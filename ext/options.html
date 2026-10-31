@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <title>Venice Bridge — Options</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 12px; }
+    label { display: block; margin-top: 12px; font-weight: 600; }
+    input, textarea { width: 100%; box-sizing: border-box; font: 13px ui-monospace, monospace; padding: 6px; }
+    textarea { height: 280px; }
+    .row { margin-top: 12px; display: flex; gap: 8px; }
+    #msg { margin-top: 8px; color: #070; }
+  </style>
+</head>
+<body>
+  <h1>Venice Bridge</h1>
+  <p>Token didapat dari terminal: <code>node daemon.mjs token</code>.</p>
+  <label for="port">Port daemon</label>
+  <input id="port" type="number" value="8765">
+  <label for="token">Token</label>
+  <input id="token" type="password" autocomplete="off">
+  <label for="selectors">Selector (JSON). Kosongkan key untuk memakai default.</label>
+  <textarea id="selectors" spellcheck="false"></textarea>
+  <div class="row">
+    <button id="save">Simpan</button>
+    <button id="reset">Kembalikan selector default</button>
+  </div>
+  <div id="msg"></div>
+  <script src="selectors.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

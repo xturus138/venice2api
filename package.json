@@ -1,0 +1,16 @@
+{
+  "name": "venice-bridge",
+  "version": "0.1.0",
+  "description": "Local coding agent that uses the Venice web chat as its brain and runs tools on your machine",
+  "type": "module",
+  "private": true,
+  "bin": { "venice-bridge": "daemon.mjs" },
+  "scripts": {
+    "start": "node daemon.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

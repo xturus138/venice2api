@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<body>
+  <button id="new" aria-label="New chat">New chat</button>
+  <button id="model" aria-label="Model selector">Llama 3.3 70B</button>
+  <div id="picker" style="display:none">
+    <div role="option">Llama 3.3 70B</div>
+    <div role="option">DeepSeek R1 (uncensored)</div>
+  </div>
+  <div id="log"></div>
+  <form id="f">
+    <textarea id="box"></textarea>
+    <button id="send" type="submit" aria-label="Send" disabled>Send</button>
+    <button id="stop" type="button" aria-label="Stop" style="display:none">Stop</button>
+  </form>
+  <script>
+    const box = document.getElementById('box');
+    const send = document.getElementById('send');
+    const stop = document.getElementById('stop');
+    const log = document.getElementById('log');
+    window.received = [];
+    box.addEventListener('input', () => { send.disabled = box.value.trim() === ''; });
+    document.getElementById('model').onclick = () => { document.getElementById('picker').style.display = 'block'; };
+    document.querySelectorAll('[role=option]').forEach((o) => o.onclick = () => {
+      document.getElementById('model').textContent = o.textContent;
+      document.getElementById('picker').style.display = 'none';
+    });
+    document.getElementById('new').onclick = () => { log.innerHTML = ''; };
+    document.getElementById('f').onsubmit = (e) => {
+      e.preventDefault();
+      const text = box.value;
+      window.received.push(text);
+      box.value = ''; send.disabled = true;
+      const u = document.createElement('div');
+      u.dataset.role = 'user'; u.textContent = text; log.appendChild(u);
+      const a = document.createElement('div');
+      a.dataset.role = 'assistant';
+      a.innerHTML = '<details open><summary>Thinking</summary>maybe {"tool":"fs_list","args":{}}</details><p></p><pre><div>tool</div><button>Copy</button><code></code></pre>';
+      log.appendChild(a);
+      stop.style.display = 'inline';
+      const words = 'I will read the file now.'.split(' ');
+      const code = '{"tool": "fs_read", "args": {"path": "' + (text.length) + '.js"}}';
+      let i = 0;
+      const t = setInterval(() => {
+        if (i < words.length) a.querySelector('p').textContent += (i ? ' ' : '') + words[i];
+        else if (i === words.length) a.querySelector('code').textContent = code;
+        else { clearInterval(t); stop.style.display = 'none'; }
+        i++;
+      }, 150);
+    };
+  </script>
+</body>
+</html>

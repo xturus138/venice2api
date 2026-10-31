@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Venice Bridge",
+  "version": "0.1.0",
+  "description": "Connects a Venice chat tab to the local venice-bridge daemon so the chat can drive local coding tools.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://venice.ai/*", "https://*.venice.ai/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://venice.ai/*", "https://*.venice.ai/*"],
+      "js": ["selectors.js", "driver.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html"
+}
