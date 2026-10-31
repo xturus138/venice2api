@@ -541,7 +541,16 @@ export class Runner {
     if (this.state.mustReread) return 'rejected — the same test error repeated 3 times. fs_read the relevant file before the next PATCH.';
     if (!fs.existsSync(target.abs)) return 'rejected — file does not exist. Use WRITE to create it.';
     const before = fs.readFileSync(target.abs, 'utf8');
-    const out = applySearchReplace(before, e.search, e.replace);
+    let out = applySearchReplace(before, e.search, e.replace);
+    // The block may hold a "=======" line of its own; try the other split points before giving up.
+    for (const alt of e.alternatives || []) {
+      if (out.ok) break;
+      const tryAlt = applySearchReplace(before, alt.search, alt.replace);
+      if (tryAlt.ok) {
+        out = tryAlt;
+        e = { ...e, search: alt.search, replace: alt.replace };
+      }
+    }
     if (!out.ok) return `rejected — ${out.error}`;
     if (!(await this.confirmIfL1(`Terapkan patch?\n${previewPatch(target.rel, e.search, e.replace)}`))) return 'rejected — the user declined.';
     await this.backupIfUntracked(target.rel, target.abs);
