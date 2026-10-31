@@ -106,13 +106,17 @@ test('secret files: refused by default, masked keys when opted in, never for key
   execFileSync('git', ['init', '-q'], { cwd: dir });
   const off = new Tools(loadConfig({ BRIDGE_ROOT: dir }));
   const on = new Tools(loadConfig({ BRIDGE_ROOT: dir, BRIDGE_ENV_KEYS: '1' }));
-  await assert.rejects(off.fs_read({ path: '.env' }), /never sent/);
+  await assert.rejects(off.fs_read({ path: '.env' }), /BRIDGE_ENV_KEYS=1/); // hint to enable
+  await assert.rejects(off.fs_read({ path: 'id_rsa' }), /never sent/); // non-env secret
   const masked = await on.fs_read({ path: '.env' });
   assert.match(masked, /API_KEY=\*\*\*/);
   assert.match(masked, /DB=\*\*\*/);
   assert.doesNotMatch(masked, /sk-xyz|postgres/);
   assert.match(masked, /# note/); // comments kept
   await assert.rejects(on.fs_read({ path: 'id_rsa' }), /refusing/); // never for key files
+  // missing secret file reports "not found", not "refusing" (existence checked first)
+  await assert.rejects(off.fs_read({ path: 'nope.env' }), /not found/);
+  assert.equal(await off.fs_list({ path: '.env' }), '.env'); // listing a name is allowed
 });
 
 test('find expression cannot read a reference file', () => {

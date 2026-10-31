@@ -46,6 +46,7 @@
       <div class="status">memuat…</div>
       <div class="row">
         <button class="stop">Stop</button>
+        <button class="retry" style="display:none">Coba lagi</button>
         <button class="test">Tes selector</button>
         <select class="key">${KEYS.map((k) => `<option>${k}</option>`).join('')}</select>
         <button class="pick">Kalibrasi</button>
@@ -70,6 +71,12 @@
     driver.cancelled = true;
     port?.postMessage({ type: 'stop' });
     setStatus('Stop dikirim ke daemon.');
+  };
+  $('.retry').onclick = () => {
+    noReconnect = false;
+    $('.retry').style.display = 'none';
+    setStatus('Mencoba menyambung lagi…');
+    connect();
   };
   $('.hide').onclick = () => {
     out.style.display = 'none';
@@ -114,9 +121,11 @@
     if (msg.type === 'status') return setStatus(msg.text);
     if (msg.type === 'conn') return setConn(msg.ok);
     if (msg.type === 'rejected') {
-      // Another tab owns the bridge. Stop reconnecting so we do not loop forever.
+      // Another tab owns the bridge. Stop auto-reconnecting (no 1s loop); the user can
+      // press "Coba lagi" after closing the other tab.
       noReconnect = true;
       setConn(false);
+      $('.retry').style.display = '';
       return setStatus(msg.text);
     }
     if (msg.type === 'cancel') {

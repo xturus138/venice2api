@@ -164,7 +164,10 @@ export class Tools {
     if (rel.startsWith('..') || path.isAbsolute(rel)) throw new ToolError(`path is outside the project: ${p}`);
     const parts = rel.split(path.sep);
     if (parts.includes('.git')) throw new ToolError('the .git folder is off limits');
-    if (!allowSecret && isSecretPath(rel)) throw new ToolError(`refusing to touch a secrets file: ${rel}`);
+    if (!allowSecret && isSecretPath(rel)) {
+      const hint = /(^|\/)\.env(\..*)?$/i.test(rel) ? ' — use fs_read (with BRIDGE_ENV_KEYS=1) to see its keys with values masked' : '';
+      throw new ToolError(`refusing to touch a secrets file: ${rel}${hint}`);
+    }
 
     // Follow symlinks on the deepest existing ancestor.
     let probe = abs;
@@ -177,7 +180,8 @@ export class Tools {
   }
 
   async fs_list({ path: p = '.', depth = 2 } = {}) {
-    const { abs, rel } = this.resolve(p);
+    // Listing only exposes names, never content, so a secret path may be listed.
+    const { abs, rel } = this.resolve(p, { allowSecret: true });
     if (!fs.existsSync(abs)) throw new ToolError(`not found: ${rel}`);
     const maxDepth = Math.min(Math.max(Number(depth) || 2, 1), 5);
     const out = [];
@@ -237,11 +241,12 @@ export class Tools {
   // Secret files are never returned verbatim. For .env-style files, when the user opted in
   // (BRIDGE_ENV_KEYS), show the KEY names with values masked so the agent knows what exists.
   readSecret(abs, rel) {
+    if (!fs.existsSync(abs)) throw new ToolError(`not found: ${rel}`);
     const isEnv = /(^|\/)\.env(\..*)?$/i.test(rel);
     if (!isEnv || !this.cfg.revealEnvKeys) {
-      throw new ToolError(`refusing to read a secrets file: ${rel}. Its contents are never sent to the web chat.`);
+      const hint = isEnv ? ' Set BRIDGE_ENV_KEYS=1 to see its keys with values masked.' : ' Its contents are never sent to the web chat.';
+      throw new ToolError(`refusing to read a secrets file: ${rel}.${hint}`);
     }
-    if (!fs.existsSync(abs)) throw new ToolError(`not found: ${rel}`);
     const out = [];
     for (const line of fs.readFileSync(abs, 'utf8').replace(/\r\n/g, '\n').split('\n')) {
       const t = line.trim();
@@ -337,7 +342,7 @@ export class Tools {
       return;
     }
     if (cmd === 'find') {
-      if (args.some((a) => FIND_BANNED.test(a))) throw new ToolError('find with -exec/-delete/-fprint is not allowed');
+      if (args.some((a) => FIND_BANNED.test(a))) throw new ToolError('find action/file flags are not allowed: -exec/-execdir/-ok, -delete, -fprint*/-fls, -files0-from, and -newer* (which reads a reference file)');
       for (const d of findStartDirs(args)) this.resolve(d);
       return;
     }

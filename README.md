@@ -85,7 +85,7 @@ node daemon.mjs run "tambahkan validasi email di form signup"
 | `BRIDGE_TEST_CMD` | kosong | tanpa test, perubahan tidak terverifikasi |
 | `BRIDGE_AUTONOMY` | `L1` | L1 = konfirmasi tiap patch dan shell; L2 = otomatis, tanya hanya untuk perintah di luar allowlist; L3 = otomatis penuh, perintah di luar allowlist ditolak |
 | `BRIDGE_MODEL` | `deepseek` | regex label model; dicek sebelum tiap kirim; kosongkan untuk menonaktifkan |
-| `BRIDGE_ENV_KEYS` | mati | `1` untuk mengizinkan `fs_read` file `.env` dengan nilai dimasking (`KEY=***`); tidak pernah berlaku untuk file kunci/sertifikat |
+| `BRIDGE_ENV_KEYS` | mati | `1` untuk mengizinkan `fs_read` file `.env` dengan nilai dimasking (`KEY=***`). Nilai disembunyikan, tetapi **nama kunci tetap terkirim** ke Venice (mis. `STRIPE_LIVE_SECRET_KEY`); nyalakan hanya jika nama variabelmu tidak sensitif. Tidak pernah berlaku untuk file kunci/sertifikat |
 | `BRIDGE_MAX_EXPLORE` / `BRIDGE_MAX_STEPS` | 10 / 60 | batas langkah |
 | `BRIDGE_STEP_DELAY_MS` | 1500 | jeda antar giliran supaya UI siap |
 | `BRIDGE_PORT` | 8765 | port WebSocket |
