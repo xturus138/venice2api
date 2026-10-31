@@ -1,8 +1,58 @@
 // Relays messages between the Venice tab (content script) and the local daemon (WebSocket).
-const DEFAULTS = { port: 8765, token: '' };
+// Also owns the chrome.debugger attachment used for trusted (real) input.
+importScripts('cdp.js');
+
+const DEFAULTS = { port: 8765, token: '', typeDelayMs: 35, typeJitter: 0.5 };
 let ws = null;
 let tab = null; // the content-script port of the active Venice tab
 let retry = null;
+
+// ---- trusted input via chrome.debugger ----
+const dbg = {
+  attach: (tabId, ver) =>
+    new Promise((res, rej) => chrome.debugger.attach({ tabId }, ver, () => (chrome.runtime.lastError ? rej(new Error(chrome.runtime.lastError.message)) : res()))),
+  detach: (tabId) => new Promise((res) => chrome.debugger.detach({ tabId }, () => (chrome.runtime.lastError, res()))),
+  sendCommand: (tabId, method, params) =>
+    new Promise((res, rej) => chrome.debugger.sendCommand({ tabId }, method, params || {}, () => (chrome.runtime.lastError ? rej(new Error(chrome.runtime.lastError.message)) : res()))),
+};
+let cdp = null;
+
+async function cdpSession() {
+  if (!cdp) {
+    const { typeDelayMs, typeJitter } = await chrome.storage.local.get(DEFAULTS);
+    cdp = new globalThis.VeniceCDP.CdpSession({ dbg, typeDelayMs, typeJitter });
+  }
+  return cdp;
+}
+
+async function handleCdp(port, tabId, msg) {
+  const reply = (ok, extra = {}) => {
+    try {
+      port.postMessage({ type: 'cdpResult', reqId: msg.reqId, ok, ...extra });
+    } catch {
+      /* port gone */
+    }
+  };
+  const s = await cdpSession();
+  try {
+    if (msg.op === 'attach') return reply(await s.attach(tabId), { reason: s.lastError });
+    if (msg.op === 'type') return reply((await s.type(msg.text)).ok, {});
+    if (msg.op === 'click') return reply((await s.click(msg.x, msg.y)).ok, {});
+    if (msg.op === 'enter') return reply((await s.enter()).ok, {});
+    if (msg.op === 'release') {
+      await s.detach('job-done');
+      return reply(true);
+    }
+    return reply(false, { error: `unknown cdp op ${msg.op}` });
+  } catch (e) {
+    return reply(false, { error: String((e && e.message) || e) });
+  }
+}
+
+// Drop any debugger attachment that has sat idle too long (never block the user's DevTools).
+setInterval(() => cdp && cdp.checkWatchdog(Date.now()), 5000);
+chrome.debugger.onDetach.addListener((source) => cdp && cdp.handleExternalDetach(source.tabId));
+if (chrome.runtime.onSuspend) chrome.runtime.onSuspend.addListener(() => cdp && cdp.detach('suspend'));
 
 function toTab(msg) {
   try {
@@ -74,11 +124,13 @@ chrome.runtime.onConnect.addListener((p) => {
   // Keep the old helpers working: they call tab.postMessage.
   tab.postMessage = (m) => p.postMessage(m);
   p.onMessage.addListener((msg) => {
-    if (msg.type === 'reply' || msg.type === 'stop') toDaemon(msg);
+    if (msg.type === 'reply' || msg.type === 'stop') return toDaemon(msg);
+    if (msg.type === 'cdp') return handleCdp(p, tab?._tabId, msg); // handled locally, not forwarded
   });
   p.onDisconnect.addListener(() => {
     if (tab?.port !== p) return;
     tab = null;
+    cdp && cdp.detach('port-closed'); // never leave the debugger attached
     toDaemon({ type: 'tab', tabReady: false });
   });
   if (ws && ws.readyState === WebSocket.OPEN) {

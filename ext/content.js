@@ -10,9 +10,34 @@
   let busy = false;
   let reloadQueued = false;
   let noReconnect = false;
+  let trustedInput = false;
+
+  // ---------- trusted-input transport (relays CDP ops to the background worker) ----------
+  const cdpPending = new Map();
+  let cdpSeq = 0;
+  function cdpCall(op, extra = {}) {
+    return new Promise((resolve) => {
+      const reqId = ++cdpSeq;
+      cdpPending.set(reqId, resolve);
+      try {
+        port.postMessage({ type: 'cdp', reqId, op, ...extra });
+      } catch {
+        cdpPending.delete(reqId);
+        resolve({ ok: false, error: 'port tidak tersedia' });
+      }
+    });
+  }
+  const transport = {
+    attach: () => cdpCall('attach'),
+    type: (text) => cdpCall('type', { text }),
+    click: (x, y) => cdpCall('click', { x, y }),
+    enter: () => cdpCall('enter'),
+    release: () => cdpCall('release'),
+  };
 
   async function loadSelectors() {
-    const { selectors: saved } = await chrome.storage.local.get({ selectors: {} });
+    const { selectors: saved, trustedInput: ti } = await chrome.storage.local.get({ selectors: {}, trustedInput: false });
+    trustedInput = !!ti;
     selectors = { ...globalThis.VB_DEFAULT_SELECTORS, ...saved };
     // Never swap the driver out from under a running job, or Stop would cancel the wrong one.
     if (busy) {
@@ -123,6 +148,14 @@
   async function handle(msg) {
     if (msg.type === 'status') return setStatus(msg.text);
     if (msg.type === 'conn') return setConn(msg.ok);
+    if (msg.type === 'cdpResult') {
+      const resolve = cdpPending.get(msg.reqId);
+      if (resolve) {
+        cdpPending.delete(msg.reqId);
+        resolve(msg);
+      }
+      return;
+    }
     if (msg.type === 'rejected') {
       // Another tab owns the bridge. Stop auto-reconnecting (no 1s loop); the user can
       // press "Coba lagi" after closing the other tab.
@@ -140,8 +173,16 @@
     busy = true;
     setBlocked(false);
     setStatus(`mengirim pesan #${msg.id} (${msg.text.length} karakter)…`);
+    // Trusted input: attach the debugger for this job. If attach fails (commonly because
+    // DevTools is open), drop to the synthetic path instead of failing the job.
+    let trusted = null;
+    if (trustedInput) {
+      const a = await transport.attach();
+      if (a && a.ok) trusted = transport;
+      else setStatus(`Input memakai jalur lama (debugger tidak bisa attach${a && a.reason ? `: ${a.reason}` : ''}).`);
+    }
     try {
-      const r = await driver.ask(msg.text, { newChat: msg.newChat, modelPattern: msg.modelPattern });
+      const r = await driver.ask(msg.text, { newChat: msg.newChat, modelPattern: msg.modelPattern, trusted });
       port?.postMessage({ type: 'reply', id: msg.id, ok: true, text: r.text, model: r.model });
       setStatus(
         r.sawStopButton
@@ -157,6 +198,7 @@
         setStatus(`gagal: ${err.message}`);
       }
     } finally {
+      if (trusted) await transport.release(); // always detach the debugger when the job ends
       busy = false;
       if (reloadQueued) {
         reloadQueued = false;
@@ -181,7 +223,7 @@
 
   setInterval(() => port?.postMessage({ type: 'keepalive' }), 25000);
   chrome.storage.onChanged.addListener((changes) => {
-    if (changes.selectors) loadSelectors();
+    if (changes.selectors || changes.trustedInput) loadSelectors();
   });
   // If the tab is navigating away mid-job, tell the daemon so it does not wait in vain.
   window.addEventListener('pagehide', () => {

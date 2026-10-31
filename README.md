@@ -64,6 +64,35 @@ tidak bisa diakses waktu kode ini ditulis. Di panel:
 Kalau UI Venice berubah, cukup kalibrasi ulang. Semua selector juga bisa
 diedit sebagai JSON di halaman Options.
 
+## Input
+
+Ada dua jalur mengisi kotak pesan dan menekan kirim:
+
+- **Sintetis (default).** Event buatan JavaScript (`execCommand`, event `paste`,
+  dll). Tidak butuh izin tambahan, tapi editor rich text (ProseMirror/Lexical)
+  kadang menolaknya, dan `element.click()` bisa tertelan oleh app yang mengikat
+  ke `pointerdown`. Isi kotak selalu diverifikasi; kalau gagal, ada pesan error.
+- **Tepercaya (opsional, lewat `debugger`).** Saat "Input tepercaya" dinyalakan
+  di Options, extension memakai CDP (`chrome.debugger`) untuk mengirim event
+  keyboard/mouse **asli** — mengetik per karakter dan mengklik di koordinat
+  tombol. Lebih andal karena halaman menerimanya seperti input manusia
+  (`isTrusted` true, rangkaian pointer/mouse lengkap). Teks panjang (>2000
+  karakter) diketik sampai ambang lalu sisanya di-`insertText` sekaligus.
+
+Jalur tepercaya adalah yang utama saat dinyalakan; jalur sintetis tetap jadi
+cadangan. Kalau `debugger` gagal attach — paling sering karena **DevTools
+sedang terbuka** di tab itu ("Another debugger is already attached") — job
+tidak batal: extension turun ke jalur sintetis dan mencatatnya di panel.
+
+Batasan jalur tepercaya:
+- Butuh izin `debugger`. Extension hanya attach ke tab Venice yang sedang
+  dikunci, hanya saat ada job berjalan, dan **selalu detach** saat job selesai,
+  Stop, tab ditutup, atau idle >30 detik. Debugger tidak pernah ditinggal
+  terpasang.
+- Muncul bar "Chrome is being controlled by automated software". Karena itu
+  defaultnya mati: nyalakan setelah selesai mengkalibrasi selector.
+- DevTools tidak bisa dibuka bersamaan di tab yang sama selagi aktif.
+
 ## Pemakaian
 
 ```bash
@@ -94,6 +123,15 @@ node daemon.mjs run "tambahkan validasi email di form signup"
 | `BRIDGE_PORT` | 8765 | port WebSocket |
 | `BRIDGE_EXT_ORIGIN` | — | kunci ke satu extension: `chrome-extension://<id>` |
 | `BRIDGE_WORKSPACE` | `./workspace` | lokasi state, log, PLAN, NOTES, dan .bak |
+
+Setelan input tepercaya diatur di **Options extension** (bukan env var, karena
+jalurnya di dalam browser):
+
+| Setelan Options | Default | Keterangan |
+|-|-|-|
+| `BRIDGE_TRUSTED_INPUT` (checkbox "Input tepercaya") | mati | pakai event asli via `debugger`. Lebih andal pada editor rich text. Mati = perilaku lama (event sintetis) |
+| `BRIDGE_TYPE_DELAY_MS` (Jeda antar ketik) | 35 | jeda antar penekanan tombol pada jalur tepercaya |
+| `BRIDGE_TYPE_JITTER` (Jitter ketik) | 0.5 | mengacak jeda ketik ±fraksi ini (clamp 0..0.9), minimal 8ms |
 
 Selama loop berjalan, jangan mengetik di tab Venice yang sama. Tombol
 **Stop** di panel atau Ctrl+C di terminal menghentikan runner, dan state
@@ -136,6 +174,7 @@ Aturan patch:
 - WebSocket hanya bind ke 127.0.0.1, Origin harus berasal dari extension, dan token dikirim lewat subprotocol (bukan query string URL, supaya tidak muncul di log). Hanya satu tab Venice yang boleh terhubung; tab kedua ditolak.
 - File di luar git disalin ke `workspace/bak/` sebelum ditimpa.
 - Output tool dibungkus penanda acak per pesan dan ditandai sebagai data, bukan instruksi.
+- Izin `debugger` (untuk input tepercaya) hanya dipakai pada tab Venice yang dikunci: mengirim event keyboard/mouse (`Input.dispatchKeyEvent`, `Input.dispatchMouseEvent`, `Input.insertText`) ke tab itu. Tidak membaca DOM, jaringan, atau tab lain, dan selalu detach di akhir job. Default mati.
 - Setiap aksi dicatat di `workspace/log.jsonl`.
 
 ## Pemulihan manual
@@ -161,8 +200,11 @@ runner end-to-end dengan otak palsu (plan, merah lalu hijau, BLOCKED + rollback,
 stop + resume, wajib `fs_read` ulang, nomor langkah dipalsukan, peringatan test
 dilonggarkan, halt + resume karena penghalang), auth WebSocket lewat subprotocol,
 dua kondisi hang (cancel sebelum tersambung, tab ditutup saat menunggu), jitter
-(deterministik saat 0, dalam rentang, clamp), dan driver DOM di Chromium termasuk
-deteksi penghalang (CAPTCHA/logout di tengah balasan, kedipan sesaat diabaikan).
+(deterministik saat 0, dalam rentang, clamp), builder plan CDP dan `CdpSession`
+dengan debugger tiruan (attach gagal → fallback, error di tengah → lapor sejauh
+mana, detach idempoten, watchdog, external detach), dan driver DOM di Chromium
+termasuk deteksi penghalang (CAPTCHA/logout di tengah balasan, kedipan sesaat
+diabaikan), jalur input tepercaya, dan fallback saat transport tepercaya gagal.
 
 **Belum teruji di Venice asli, perlu kalibrasi di akunmu:**
 - Selector adalah tebakan; kalibrasi lewat panel sebelum dipakai.
@@ -175,6 +217,9 @@ deteksi penghalang (CAPTCHA/logout di tengah balasan, kedipan sesaat diabaikan).
   deteksi penghalang), **bukan** kecocokan dengan DOM Venice yang sebenarnya.
 - `blockerSelector` dan `limitSelector` adalah tebakan paling spekulatif karena
   bergantung pada markup challenge/modal Venice; kalibrasi saat penghalang muncul.
+- Glue `chrome.debugger` di `background.js` (attach/detach nyata, pesan port)
+  tidak di-unit-test karena butuh API Chrome; yang teruji adalah `CdpSession`
+  dengan debugger tiruan. Jalur input tepercaya di Venice asli belum dicoba.
 
 ## Kalau muncul penghalang
 

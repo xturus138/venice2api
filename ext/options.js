@@ -5,11 +5,16 @@ const say = (t, ok = true) => {
 };
 
 async function load() {
-  const { port, token, selectors } = await chrome.storage.local.get({ port: 8765, token: '', selectors: {} });
-  $('port').value = port;
-  $('token').value = token;
-  $('selectors').value = JSON.stringify({ ...globalThis.VB_DEFAULT_SELECTORS, ...selectors }, null, 2);
+  const s = await chrome.storage.local.get({ port: 8765, token: '', selectors: {}, trustedInput: false, typeDelayMs: 35, typeJitter: 0.5 });
+  $('port').value = s.port;
+  $('token').value = s.token;
+  $('trustedInput').checked = !!s.trustedInput;
+  $('typeDelayMs').value = s.typeDelayMs;
+  $('typeJitter').value = s.typeJitter;
+  $('selectors').value = JSON.stringify({ ...globalThis.VB_DEFAULT_SELECTORS, ...s.selectors }, null, 2);
 }
+
+const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
 $('save').onclick = async () => {
   let parsed;
@@ -31,7 +36,14 @@ $('save').onclick = async () => {
     if (v !== globalThis.VB_DEFAULT_SELECTORS[k]) custom[k] = v.trim();
   }
   if (invalid.length) return say(`Selector tidak valid (sintaks CSS): ${invalid.join(', ')}`, false);
-  await chrome.storage.local.set({ port: Number($('port').value) || 8765, token: $('token').value.trim(), selectors: custom });
+  await chrome.storage.local.set({
+    port: Number($('port').value) || 8765,
+    token: $('token').value.trim(),
+    selectors: custom,
+    trustedInput: $('trustedInput').checked,
+    typeDelayMs: Math.max(0, Number($('typeDelayMs').value) || 35),
+    typeJitter: clamp(Number($('typeJitter').value) || 0, 0, 0.9),
+  });
   say('Tersimpan.');
 };
 

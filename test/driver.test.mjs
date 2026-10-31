@@ -118,3 +118,65 @@ test('blockerWatch needs two consecutive polls and distinguishes codes', { skip:
     await browser.close();
   }
 });
+
+test('trusted transport is used for input when provided, and the reply still parses', { skip: !chromium && 'playwright not installed' }, async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.goto('file://' + path.join(here, 'fixtures/fake-chat.html'));
+    await page.addScriptTag({ path: path.join(here, '../ext/selectors.js') });
+    await page.addScriptTag({ path: path.join(here, '../ext/driver.js') });
+    const out = await page.evaluate(async () => {
+      const sel = { ...globalThis.VB_DEFAULT_SELECTORS, modelLabel: '#model', newChatButton: '#new' };
+      const d = new globalThis.VeniceDriver(sel, { stableMs: 400, pollMs: 80, pollJitter: 0, appearTimeoutMs: 6000, maxReplyMs: 8000 });
+      const log = [];
+      // A fake transport that fills the box (so holdsText passes) and, on click, triggers the
+      // real send button so the form actually submits — mimicking a real trusted click.
+      const box = document.getElementById('box');
+      const trusted = {
+        async click(x, y) { log.push(['click', Math.round(x) >= 0]); document.getElementById('send').click(); },
+        async type(text) {
+          log.push(['type', text]);
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          setter.call(box, text);
+          box.dispatchEvent(new Event('input', { bubbles: true }));
+        },
+        async enter() { log.push(['enter']); },
+      };
+      const r = await d.ask('hello trusted', { modelPattern: '', trusted });
+      return { log, received: window.received, text: r.text };
+    });
+    assert.deepEqual(out.received, ['hello trusted']);
+    assert.ok(out.log.some(([op, v]) => op === 'type' && v === 'hello trusted'), JSON.stringify(out.log));
+    assert.ok(out.log.some(([op]) => op === 'click')); // submit via trusted click on the send button
+  } finally {
+    await browser.close();
+  }
+});
+
+test('when the trusted transport fails, input falls back to the synthetic path', { skip: !chromium && 'playwright not installed' }, async () => {
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.goto('file://' + path.join(here, 'fixtures/fake-chat.html'));
+    await page.addScriptTag({ path: path.join(here, '../ext/selectors.js') });
+    await page.addScriptTag({ path: path.join(here, '../ext/driver.js') });
+    const out = await page.evaluate(async () => {
+      const sel = { ...globalThis.VB_DEFAULT_SELECTORS, modelLabel: '#model', newChatButton: '#new' };
+      const d = new globalThis.VeniceDriver(sel, { stableMs: 400, pollMs: 80, pollJitter: 0 });
+      // Transport that never fills the box and throws on click -> driver must fall back.
+      const trusted = {
+        async click() { throw new Error('cdp click failed'); },
+        async type() { /* does nothing: box stays empty */ },
+        async enter() { throw new Error('cdp enter failed'); },
+      };
+      const r = await d.ask('fallback works', { modelPattern: '', trusted });
+      return { received: window.received, text: r.text };
+    });
+    // Despite the broken transport, the synthetic path put the text in and sent it.
+    assert.deepEqual(out.received, ['fallback works']);
+    assert.match(out.text, /I will read the file now\./);
+  } finally {
+    await browser.close();
+  }
+});

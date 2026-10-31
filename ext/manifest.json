@@ -4,7 +4,7 @@
   "name": "Venice Bridge",
   "version": "0.1.0",
   "description": "Connects a Venice chat tab to the local venice-bridge daemon so the chat can drive local coding tools.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "debugger"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
     {

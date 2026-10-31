@@ -27,6 +27,7 @@
       this.pollMs = opts.pollMs ?? 400;
       this.pollJitter = opts.pollJitter ?? 0.25; // 0 = deterministic (tests)
       this.cancelled = false;
+      this.trusted = null; // real-input transport, set per ask()
     }
 
     nextPoll() {
@@ -139,12 +140,49 @@
       return el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' ? el.value : (el.innerText ?? el.textContent ?? '');
     }
 
-    // Fill the message box and VERIFY it actually holds the text. Rich editors
-    // (ProseMirror, Lexical) ignore naive writes, which otherwise sends an empty prompt.
-    setInput(el, text) {
-      el.focus();
+    holdsText(el, text) {
       const expect = text.replace(/\r\n/g, '\n').trimEnd();
-      const holds = () => this.inputValue(el).replace(/\r\n/g, '\n').trimEnd() === expect;
+      return this.inputValue(el).replace(/\r\n/g, '\n').trimEnd() === expect;
+    }
+
+    clearInput(el) {
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, '');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return;
+      }
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand && document.execCommand('delete');
+    }
+
+    // Primary path: real key events via the debugger (this.trusted). Falls back to the
+    // synthetic path when trusted input is off, attach failed, or the editor stayed empty.
+    async setInput(el, text) {
+      el.focus();
+      if (this.trusted) {
+        try {
+          this.clearInput(el);
+          const r = el.getBoundingClientRect();
+          await this.trusted.click(r.left + r.width / 2, r.top + r.height / 2);
+          await this.trusted.type(text);
+          if (this.holdsText(el, text)) return;
+        } catch {
+          /* fall through to synthetic for the whole field */
+        }
+      }
+      this.setInputSynthetic(el, text);
+    }
+
+    // Fill the message box with synthetic events and VERIFY it holds the text. Rich editors
+    // (ProseMirror, Lexical) ignore naive writes, which otherwise sends an empty prompt.
+    setInputSynthetic(el, text) {
+      el.focus();
+      const holds = () => this.holdsText(el, text);
 
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
         const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -157,11 +195,7 @@
 
       // contenteditable: execCommand('insertText') is the one path rich editors reliably
       // accept. Clear first, insert, then fall back to a paste event, and verify.
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
+      this.clearInput(el);
       document.execCommand && document.execCommand('insertText', false, text);
       if (!holds()) {
         try {
@@ -182,6 +216,20 @@
         const b = this.firstVisible(this.sel.sendButton);
         return b && !b.disabled && b.getAttribute('aria-disabled') !== 'true' ? b : null;
       }, 5000);
+      if (this.trusted) {
+        try {
+          if (btn) {
+            const r = btn.getBoundingClientRect();
+            await this.trusted.click(r.left + r.width / 2, r.top + r.height / 2);
+          } else {
+            el.focus();
+            await this.trusted.enter();
+          }
+          return;
+        } catch {
+          /* fall through to synthetic */
+        }
+      }
       if (btn) {
         btn.click();
         return;
@@ -222,9 +270,11 @@
       return re.test(label) ? { ok: true, model: label } : { ok: false, reason: `setelah memilih, model masih "${label}"` };
     }
 
-    // Send one message and wait for the complete reply.
-    async ask(text, { newChat = false, modelPattern = '' } = {}) {
+    // Send one message and wait for the complete reply. `trusted` is the real-input transport
+    // (type/click/enter via the debugger) or null for the synthetic path.
+    async ask(text, { newChat = false, modelPattern = '', trusted = null } = {}) {
       this.cancelled = false;
+      this.trusted = trusted;
       if (newChat) await this.newChat();
       const model = await this.ensureModel(modelPattern);
       if (!model.ok) throw new Error(`kunci model gagal: ${model.reason}`);
@@ -233,7 +283,7 @@
       const input = this.firstVisible(this.sel.input);
       if (!input) throw new Error('kotak input tidak ditemukan (selector "input")');
       const before = this.messages().length;
-      this.setInput(input, text); // throws if the box did not actually take the text
+      await this.setInput(input, text); // throws if the box did not actually take the text
       await sleep(250);
       await this.submit(input);
 
