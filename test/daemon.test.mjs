@@ -113,3 +113,66 @@ test('pagehide signal (reply id 0) rejects pending work instead of being ignored
     brain.close();
   }
 });
+
+test('daemon tolerates malformed and stray socket messages without crashing', async () => {
+  const port = 15000 + Math.floor(Math.random() * 1000);
+  const brain = new WsBrain({ port, token: TOKEN, replyTimeoutMs: 5000 });
+  await brain.listen();
+  try {
+    const { ok, ws } = await open(port);
+    assert.equal(ok, true);
+    ws.send('this is not json {{{');            // garbage
+    ws.send(JSON.stringify({ type: 'nonsense' })); // unknown type
+    ws.send(JSON.stringify({ type: 'reply', id: 999, ok: true, text: 'x' })); // reply to nobody
+    ws.send(JSON.stringify({ type: 'hello', tabReady: true }));
+    await new Promise((r) => setTimeout(r, 80));
+    // Still healthy: a real round-trip works after the noise.
+    ws.on('message', (d) => {
+      const m = JSON.parse(String(d));
+      if (m.type === 'send') ws.send(JSON.stringify({ type: 'reply', id: m.id, ok: true, text: 'pong', model: 'm' }));
+    });
+    assert.equal((await brain.send('ping')).text, 'pong');
+  } finally {
+    brain.close();
+  }
+});
+
+test('a duplicate reply for the same id is ignored (resolves once)', async () => {
+  const port = 15500 + Math.floor(Math.random() * 1000);
+  const brain = new WsBrain({ port, token: TOKEN, replyTimeoutMs: 5000 });
+  await brain.listen();
+  try {
+    const { ws } = await open(port);
+    ws.on('message', (d) => {
+      const m = JSON.parse(String(d));
+      if (m.type === 'send') {
+        ws.send(JSON.stringify({ type: 'reply', id: m.id, ok: true, text: 'first', model: 'm' }));
+        ws.send(JSON.stringify({ type: 'reply', id: m.id, ok: true, text: 'second', model: 'm' }));
+      }
+    });
+    ws.send(JSON.stringify({ type: 'hello', tabReady: true }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await brain.send('x')).text, 'first');
+    await new Promise((r) => setTimeout(r, 50)); // the duplicate must not throw or double-resolve
+  } finally {
+    brain.close();
+  }
+});
+
+test('a second extension connection replaces the first', async () => {
+  const port = 15800 + Math.floor(Math.random() * 1000);
+  const brain = new WsBrain({ port, token: TOKEN, replyTimeoutMs: 5000 });
+  await brain.listen();
+  try {
+    const a = await open(port);
+    let aClosed = false;
+    a.ws.on('close', () => (aClosed = true));
+    await new Promise((r) => setTimeout(r, 30));
+    const b = await open(port);
+    assert.equal(b.ok, true);
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(aClosed, true, 'first connection should be dropped when a second arrives');
+  } finally {
+    brain.close();
+  }
+});

@@ -376,3 +376,157 @@ test('the full shell is not available during exploration', async () => {
   assert.match(brain.sent[1], /not available during exploration/);
   assert.equal(fs.existsSync(path.join(cfg.root, 'explore.txt')), false);
 });
+
+// ---------- misbehaving model: the runner must always terminate and stay consistent ----------
+
+test('a model that never submits a plan halts at the exploration budget (no infinite loop)', async () => {
+  const { cfg, store } = setup({ BRIDGE_MAX_EXPLORE: '5' });
+  const replies = Array.from({ length: 50 }, () => tool('fs_list'));
+  const brain = scriptedBrain(replies);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI() }).start('x');
+  assert.equal(state.phase, 'halted');
+  assert.match(state.haltReason, /batas eksplorasi/);
+  assert.ok(brain.sent.length <= 7, `sent ${brain.sent.length} messages`); // bounded, not runaway
+});
+
+test('a model that loops tool calls forever halts at the execution budget', async () => {
+  const { cfg, store } = setup({ BRIDGE_MAX_STEPS: '6' });
+  const replies = [PLAN, ...Array.from({ length: 50 }, () => tool('fs_read', { path: 'math.js' }))];
+  const brain = scriptedBrain(replies);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI(['a']) }).start('x');
+  assert.equal(state.phase, 'halted');
+  assert.match(state.haltReason, /batas 6 langkah/);
+});
+
+test('three malformed replies in a row halt the run (exploration)', async () => {
+  const { cfg, store } = setup();
+  const brain = scriptedBrain(['garbage one', 'garbage two', 'garbage three', tool('fs_list')]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI() }).start('x');
+  assert.equal(state.phase, 'halted');
+  assert.match(state.haltReason, /format balasan salah/);
+  assert.match(brain.sent[1], /No action found|not valid JSON|incomplete/);
+});
+
+test('malformed replies during execution recover if the model corrects within the limit', async () => {
+  const { dir, cfg, store } = setup();
+  const brain = scriptedBrain([
+    PLAN,
+    tool('focus_set', { paths: ['math.js'] }),
+    'oops no action here',
+    'still nothing',
+    patch('a - b', 'a + b'), // corrects on the 3rd try (counter resets on any valid action)
+    tool('step_done', { step: 1 }),
+    tool('task_done', { summary: 'ok' }),
+  ]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI(['a', 'a']) }).start('x');
+  assert.equal(state.phase, 'done');
+  assert.match(fs.readFileSync(path.join(dir, 'math.js'), 'utf8'), /a \+ b/);
+});
+
+test('an unknown tool name is reported, and the run continues', async () => {
+  const { cfg, store } = setup();
+  const brain = scriptedBrain([
+    PLAN,
+    tool('teleport', { to: 'mars' }),
+    tool('focus_set', { paths: ['math.js'] }),
+    patch('a - b', 'a + b'),
+    tool('step_done', { step: 1 }),
+    tool('task_done', { summary: 'ok' }),
+  ]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI(['a', 'a']) }).start('x');
+  assert.match(brain.sent[2], /Unknown tool "teleport"/);
+  assert.equal(state.phase, 'done');
+});
+
+test('mixed actions in one reply are rejected without applying anything', async () => {
+  const { dir, cfg, store } = setup();
+  const mixed = tool('fs_read', { path: 'math.js' }) + '\n' + patch('a - b', 'a + b');
+  const brain = scriptedBrain([PLAN, tool('focus_set', { paths: ['math.js'] }), mixed, patch('a - b', 'a + b'), tool('step_done', { step: 1 }), tool('task_done', { summary: 'ok' })]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI(['a', 'a']) }).start('x');
+  assert.match(brain.sent[3], /Mixed actions/);
+  assert.equal(state.phase, 'done'); // the later valid patch still lands
+});
+
+test('a model that halts immediately leaves a clean, resumable state', async () => {
+  const { g, cfg, store } = setup();
+  const brain = scriptedBrain([tool('halt', { reason: 'I give up' })]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI() }).start('x');
+  assert.equal(state.phase, 'halted');
+  assert.match(state.haltReason, /I give up/);
+  assert.equal(g('status', '--porcelain'), ''); // checkpoint 0 was committed, tree clean
+  assert.match(g('rev-parse', '--abbrev-ref', 'HEAD'), /^agent\//);
+});
+
+test('an enormous reply is handled without error', async () => {
+  const { cfg, store } = setup();
+  const huge = 'x'.repeat(200000) + '\n' + tool('fs_list') + '\n' + 'y'.repeat(200000);
+  const brain = scriptedBrain([huge, PLAN, tool('focus_set', { paths: ['math.js'] }), patch('a - b', 'a + b'), tool('step_done', { step: 1 }), tool('task_done', { summary: 'ok' })]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI(['a', 'a']) }).start('x');
+  assert.equal(state.phase, 'done'); // the fs_list inside the noise was found and run
+});
+
+test('focus_set rejects more than the max number of files', async () => {
+  const { cfg, store } = setup();
+  const brain = scriptedBrain([PLAN, tool('focus_set', { paths: ['a.js', 'b.js', 'c.js', 'd.js', 'e.js'] }), tool('halt', { reason: 'end' })]);
+  await new Runner({ cfg, store, brain, ui: scriptedUI(['a']) }).start('x');
+  assert.match(brain.sent[2], /At most 4 focus files|focus/i);
+});
+
+test('a patch for a file not in focus is refused, so edits need focus_set first', async () => {
+  const { dir, cfg, store } = setup();
+  const brain = scriptedBrain([PLAN, patch('a - b', 'a + b'), tool('halt', { reason: 'end' })]);
+  await new Runner({ cfg, store, brain, ui: scriptedUI(['a']) }).start('x');
+  assert.match(brain.sent[2], /not in focus/);
+  assert.match(fs.readFileSync(path.join(dir, 'math.js'), 'utf8'), /a - b/); // unchanged
+});
+
+// ---------- WRITE and patch-alternatives integration ----------
+
+test('WRITE creates a new nested file but refuses to overwrite an existing one', async () => {
+  const { dir, cfg, store } = setup({ BRIDGE_TEST_CMD: '' });
+  const writeNew = 'WRITE lib/util/new.js\n<<<<<<< CONTENT\nexport const x = 1;\n>>>>>>> END';
+  const writeExisting = 'WRITE math.js\n<<<<<<< CONTENT\nnope\n>>>>>>> END';
+  const brain = scriptedBrain([
+    PLAN,
+    tool('focus_set', { paths: ['lib/util/new.js', 'math.js'] }),
+    writeNew,
+    writeExisting,
+    tool('step_done', { step: 1 }),
+    tool('task_done', { summary: 'ok' }),
+  ]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI(['a', 'a']) }).start('x');
+  assert.equal(fs.readFileSync(path.join(dir, 'lib/util/new.js'), 'utf8').trim(), 'export const x = 1;');
+  assert.match(brain.sent[3], /created/);
+  assert.match(brain.sent[4], /already exists/);
+  assert.equal(fs.readFileSync(path.join(dir, 'math.js'), 'utf8'), MATH_BUGGY); // not overwritten
+  assert.equal(state.phase, 'done');
+});
+
+test('a PATCH whose SEARCH contains a ======= line still applies via alternatives', async () => {
+  const { dir, cfg, store } = setup({ BRIDGE_TEST_CMD: '' });
+  const content = '# Heading\n=======\nkeep this\nmore\n';
+  const write = `WRITE notes.md\n<<<<<<< CONTENT\n${content}>>>>>>> END`;
+  const patchWithSep = [
+    'PATCH notes.md',
+    '<<<<<<< SEARCH',
+    '# Heading',
+    '=======', // part of the content, not the separator
+    'keep this',
+    'more',
+    '=======', // the real separator
+    'replaced!',
+    '>>>>>>> REPLACE',
+  ].join('\n');
+  const brain = scriptedBrain([
+    PLAN,
+    tool('focus_set', { paths: ['notes.md'] }),
+    write,
+    patchWithSep,
+    tool('step_done', { step: 1 }),
+    tool('task_done', { summary: 'ok' }),
+  ]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI(['a', 'a']) }).start('x');
+  assert.equal(state.phase, 'done');
+  assert.equal(fs.readFileSync(path.join(dir, 'notes.md'), 'utf8').trim(), 'replaced!');
+  assert.match(brain.sent[4], /applied/);
+});

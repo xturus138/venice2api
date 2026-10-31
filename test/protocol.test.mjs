@@ -84,3 +84,55 @@ test('non-breaking spaces and zero-width chars are normalised', () => {
   const r = parseReply('{"tool": "fs_list",​"args":{}}');
   assert.equal(r.tool, 'fs_list');
 });
+
+test('a SEARCH body containing a ======= line yields alternative split points', () => {
+  const reply = [
+    'PATCH doc.md',
+    '<<<<<<< SEARCH',
+    '# Title',
+    '=======',          // this is real content, not the separator
+    'body line',
+    '=======',          // this is the real separator
+    'new content',
+    '>>>>>>> REPLACE',
+  ].join('\n');
+  const r = parseReply(reply);
+  assert.equal(r.kind, 'edits');
+  const e = r.edits[0];
+  // Primary split uses the FIRST =======; alternatives cover the later one.
+  assert.ok(e.alternatives && e.alternatives.length >= 1);
+  const all = [{ search: e.search, replace: e.replace }, ...e.alternatives];
+  assert.ok(all.some((a) => a.search === '# Title\n=======\nbody line' && a.replace === 'new content'));
+});
+
+test('markers must start their own line: a >>>>>>> inside text is not a marker', () => {
+  const reply = 'Here is how a conflict looks: `<<<<<<< SEARCH` and `>>>>>>> REPLACE` inline. No action though.';
+  const r = parseReply(reply);
+  assert.equal(r.kind, 'error');
+});
+
+test('a tool call whose JSON is broken gets a JSON-specific error', () => {
+  const r = parseReply("```tool\n{'tool': 'fs_read', path: 'a.js',}\n```");
+  assert.equal(r.kind, 'error');
+  assert.match(r.error, /valid JSON|double quotes/);
+});
+
+test('CRLF line endings in a patch are handled', () => {
+  const reply = 'PATCH a.js\r\n<<<<<<< SEARCH\r\nline1\r\nline2\r\nline3\r\n=======\r\nnew\r\n>>>>>>> REPLACE';
+  const r = parseReply(reply);
+  assert.equal(r.kind, 'edits');
+  assert.equal(r.edits[0].search, 'line1\nline2\nline3');
+  assert.equal(r.edits[0].replace, 'new');
+});
+
+test('tool name with surrounding whitespace is trimmed', () => {
+  const r = parseReply('{"tool": "  fs_list  ", "args": {}}');
+  assert.equal(r.kind, 'tool');
+  assert.equal(r.tool, 'fs_list');
+});
+
+test('args that are an array (not an object) are coerced to an empty object', () => {
+  const r = parseReply('{"tool": "fs_list", "args": [1,2,3]}');
+  assert.equal(r.kind, 'tool');
+  assert.deepEqual(r.args, {});
+});

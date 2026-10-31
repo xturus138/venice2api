@@ -165,3 +165,49 @@ test('an unavailable shell reports it instead of throwing', async () => {
   assert.equal(r.code, -1);
   assert.match(r.output, /not available/);
 });
+
+test('a process that prints a flood of output is bounded, not OOM', { skip: skipNoBash }, async () => {
+  const { fsh } = shell();
+  const r = await fsh.run('bash', 'yes ABCDEFGH | head -n 2000000', { timeoutMs: 20000 });
+  assert.ok(r.output.length <= 1_100_000, `output not bounded: ${r.output.length}`);
+  const shown = fsh.format(r);
+  assert.ok(shown.length <= cfgOut() + 200);
+});
+
+function cfgOut() {
+  return loadConfig({ BRIDGE_ROOT: '/tmp', BRIDGE_SHELL: 'full' }).shellOutputMaxChars;
+}
+
+test('a process that ignores SIGTERM is still killed on timeout (we use SIGKILL)', { skip: skipNoBash }, async () => {
+  const { fsh } = shell();
+  const t0 = Date.now();
+  const r = await fsh.run('bash', "trap '' TERM INT; sleep 30", { timeoutMs: 500 });
+  assert.equal(r.timedOut, true);
+  assert.ok(Date.now() - t0 < 6000, `took ${Date.now() - t0}ms`);
+});
+
+test('multiline secrets spanning the whole output are redacted', () => {
+  const { fsh } = shell();
+  const out = {
+    code: 0,
+    output: 'before\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3line1\nAAAAB3line2\n-----END OPENSSH PRIVATE KEY-----\nafter',
+    timedOut: false,
+    aborted: false,
+  };
+  const text = fsh.format(out);
+  assert.ok(!text.includes('AAAAB3line1'), text);
+  assert.match(text, /before/);
+  assert.match(text, /after/);
+});
+
+test('format reports timeout and user-stop distinctly from an exit code', () => {
+  const { fsh } = shell();
+  assert.match(fsh.format({ code: 0, output: 'x', timedOut: false, aborted: false }), /^exit 0/);
+  assert.match(fsh.format({ code: null, output: '', timedOut: true, aborted: false }), /timeout/);
+  assert.match(fsh.format({ code: null, output: '', timedOut: false, aborted: true }), /stopped by user/);
+});
+
+test('empty output still produces a readable result', () => {
+  const { fsh } = shell();
+  assert.match(fsh.format({ code: 0, output: '', timedOut: false, aborted: false }), /\(no output\)/);
+});
