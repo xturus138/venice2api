@@ -52,6 +52,14 @@ export function loadConfig(env = process.env) {
     grepMaxLines: num(env.BRIDGE_GREP_MAX_LINES, 40),
     outputMaxChars: num(env.BRIDGE_OUTPUT_MAX_CHARS, 3000),
     shellTimeoutMs: num(env.BRIDGE_SHELL_TIMEOUT_MS, 120 * 1000),
+    // "full" turns on the bash / powershell / cmd tools (arbitrary commands, not a sandbox).
+    // Anything else keeps only the allowlisted shell_safe.
+    shellMode: String(env.BRIDGE_SHELL || '').toLowerCase() === 'full' ? 'full' : 'safe',
+    // Env var names to pass through to full-shell commands even though they look secret
+    // (e.g. an API key curl needs). Everything else secret-looking is stripped.
+    shellKeepEnv: String(env.BRIDGE_SHELL_KEEP_ENV || '').split(',').map((s) => s.trim()).filter(Boolean),
+    shellMaxTimeoutMs: num(env.BRIDGE_SHELL_MAX_TIMEOUT_S, 600) * 1000,
+    shellOutputMaxChars: num(env.BRIDGE_SHELL_OUTPUT_MAX_CHARS, 6000),
     testTimeoutMs: num(env.BRIDGE_TEST_TIMEOUT_MS, 10 * 60 * 1000),
     maxFocus: 4,
   };

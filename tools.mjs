@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { run } from './git.mjs';
+import { FullShell, scrubEnv as scrubEnvShared } from './fullshell.mjs';
 
 export const READ_ONLY_TOOLS = new Set(['fs_list', 'fs_read', 'grep_search', 'git_read', 'test_run']);
 
@@ -131,14 +132,8 @@ function checkGitArgs(args) {
   }
 }
 
-function scrubEnv() {
-  const env = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (/TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE|CREDENTIAL/i.test(k)) continue;
-    env[k] = v;
-  }
-  return env;
-}
+// shell_safe and test_run never get secret-looking env vars (the full shell may keep some).
+const scrubEnv = () => scrubEnvShared(process.env, []);
 
 export function truncate(text, max) {
   if (text.length <= max) return text;
@@ -152,6 +147,7 @@ export class Tools {
     if (!cfg.root) throw new Error('BRIDGE_ROOT belum diset.');
     this.cfg = cfg;
     this.root = fs.realpathSync(cfg.root);
+    this.full = new FullShell({ cwd: this.root, cfg });
   }
 
   // Resolve a model-supplied path and keep it inside the project.

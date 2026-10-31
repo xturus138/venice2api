@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { Git } from './git.mjs';
 import { jittered } from './config.mjs';
+import { riskReasons } from './fullshell.mjs';
 import { Tools, ToolError, READ_ONLY_TOOLS, trimFailures } from './tools.mjs';
 import { parseReply } from './protocol.mjs';
 import { applySearchReplace, previewPatch } from './patches.mjs';
@@ -54,7 +55,30 @@ export class Runner {
     if (this.stopped) return;
     this.stopped = true;
     this.stopReason = reason;
+    this.tools.full.abort(); // kill a full-shell command that is running right now
     this.brain.cancel?.(reason);
+  }
+
+  // Which full-shell tools to advertise to the model (none unless BRIDGE_SHELL=full).
+  promptOpts() {
+    return { shells: this.cfg.shellMode === 'full' ? this.tools.full.available() : [] };
+  }
+
+  // Tell the user the full shell is on; in L3 make them acknowledge it once per run.
+  async confirmFullShell() {
+    if (this.cfg.shellMode !== 'full') return;
+    const shells = this.tools.full.available();
+    if (!shells.length) {
+      this.ui.print('BRIDGE_SHELL=full aktif, tetapi bash/powershell/cmd tidak ditemukan di mesin ini. Shell penuh dimatikan.');
+      return;
+    }
+    this.ui.print(`Shell penuh AKTIF (${shells.join(', ')}). Perintah berjalan dengan hak aksesmu sendiri dan bukan di sandbox.`);
+    if (this.cfg.autonomy === 'L3') {
+      const ok = await this.ui.confirm(
+        'Otonomi L3 + shell penuh: perintah berjalan otomatis tanpa konfirmasi (hanya yang ditandai berisiko yang tetap bertanya). Pakai hanya di container/VM. Lanjut?',
+      );
+      if (!ok) throw new Error('Dibatalkan: L3 dengan shell penuh tidak disetujui. Pakai BRIDGE_AUTONOMY=L1 atau L2.');
+    }
   }
 
   save() {
@@ -77,6 +101,7 @@ export class Runner {
       throw new Error(`Masih ada task yang belum selesai ("${existing.task}"). Jalankan "resume" atau "abandon" dulu.`);
     }
     if (!(await this.git.isRepo())) throw new Error(`${this.tools.root} bukan repo git. Jalankan "git init" di salinan proyekmu dulu.`);
+    await this.confirmFullShell();
 
     const baseBranch = (await this.git.hasCommits()) ? await this.git.currentBranch() : null;
     const slug = slugify(task);
@@ -106,7 +131,7 @@ export class Runner {
     this.ui.print(`Branch ${branch} dibuat, checkpoint 0 = ${sha0.slice(0, 8)}.`);
 
     this.needNewChat = true;
-    this.pending = P.exploreStart(task, this.cfg.maxExploreSteps);
+    this.pending = P.exploreStart(task, this.cfg.maxExploreSteps, this.promptOpts());
     return this.loop();
   }
 
@@ -114,12 +139,15 @@ export class Runner {
     const s = this.store.load();
     if (!s) throw new Error('Tidak ada task untuk dilanjutkan.');
     if (s.phase === 'done') throw new Error('Task sudah selesai.');
+    await this.confirmFullShell();
     this.state = s;
     this.state.paused = false;
 
     if ((await this.git.currentBranch()) !== s.branch) await this.git.must(['switch', '-q', s.branch]);
-    if (await this.git.isDirty()) {
-      this.ui.print(`Ada perubahan setengah jalan. Rollback ke checkpoint terakhir ${this.lastCheckpoint().slice(0, 8)}.`);
+    // Roll back when work is half done OR when HEAD is no longer the last checkpoint
+    // (history was rewound, or a crash landed between the commit and the state save).
+    if ((await this.git.isDirty()) || (await this.git.head()) !== this.lastCheckpoint()) {
+      this.ui.print(`Keadaan git tidak sama dengan checkpoint terakhir (ada perubahan setengah jalan atau riwayat bergeser). Rollback ke checkpoint terakhir ${this.lastCheckpoint().slice(0, 8)}.`);
       await this.git.rollback(this.lastCheckpoint());
     }
     if (s.phase === 'halted') {
@@ -133,7 +161,7 @@ export class Runner {
 
     if (s.phase === 'exploring' || s.phase === 'executing') {
       this.needNewChat = true;
-      this.pending = P.resume(s, this.store.doc('PLAN.md'), this.store.doc('NOTES.md'), this.store.focus());
+      this.pending = P.resume(s, this.store.doc('PLAN.md'), this.store.doc('NOTES.md'), this.store.focus(), this.promptOpts());
     }
     return this.loop();
   }
@@ -171,6 +199,7 @@ export class Runner {
       this.halt(`error: ${err.message}`);
       throw err;
     } finally {
+      this.tools.full.killAll(); // background processes the model started must not outlive the run
       this.ui.status(`selesai: ${this.state.phase}`);
     }
   }
@@ -339,6 +368,10 @@ export class Runner {
       }
       case 'shell_safe':
         return this.shell(args);
+      case 'bash':
+      case 'powershell':
+      case 'cmd':
+        return this.fullShell(tool, args);
       case 'step_done':
         return this.finishStep(args);
       case 'blocked':
@@ -395,6 +428,73 @@ export class Runner {
     }
     this.log({ type: 'shell', line });
     return this.tools.shell(req);
+  }
+
+  // ---------- full shell (BRIDGE_SHELL=full) ----------
+
+  async stashCount() {
+    const r = await this.git.git(['rev-list', '--walk-reflogs', '--count', 'refs/stash']);
+    return r.code === 0 ? Number(r.stdout.trim()) || 0 : 0;
+  }
+
+  // A shell command must not move the runner's git state: checkpoints and rollback depend on it.
+  // Returns a note for the model, or null after halting (state is saved, resume still works).
+  async guardGit(before) {
+    const notes = [];
+    const branch = await this.git.currentBranch();
+    if (branch !== before.branch) {
+      const r = await this.git.git(['switch', '-q', before.branch]);
+      if (r.code !== 0) {
+        this.halt(`perintah shell memindahkan branch dan tidak bisa dipulihkan: ${(r.stderr || r.stdout).trim()}`);
+        return null;
+      }
+      notes.push(`Your command switched branches; switched back to ${before.branch}.`);
+    }
+    const head = await this.git.head();
+    if (head !== before.sha) {
+      const forward = (await this.git.git(['merge-base', '--is-ancestor', before.sha, head])).code === 0;
+      if (!forward) {
+        this.halt('perintah shell memundurkan riwayat git; lanjutkan dengan "resume" (rollback ke checkpoint terakhir)');
+        return null;
+      }
+      await this.git.must(['reset', '-q', '--soft', before.sha]);
+      notes.push(`Your command created commits; HEAD was restored to ${before.sha.slice(0, 8)} and the changes were kept in the working tree. Do not commit: the runner makes checkpoints.`);
+    }
+    if ((await this.stashCount()) > before.stash) {
+      const r = await this.git.git(['stash', 'pop', '-q']);
+      notes.push(r.code === 0 ? 'Your command stashed changes; they were restored. Do not use git stash.' : 'Your command stashed changes and they could NOT be restored automatically. Run "git stash pop".');
+    }
+    return notes.length ? `\n[runner] ${notes.join(' ')}` : '';
+  }
+
+  // Returns a result string, { error }, or null when the run was halted.
+  async fullShell(tool, args) {
+    if (this.cfg.shellMode !== 'full') return { error: `"${tool}" is not enabled. Use shell_safe.` };
+    const avail = this.tools.full.available();
+    if (!avail.includes(tool)) return { error: `${tool} is not available on this machine. Available: ${avail.join(', ') || 'none'}.` };
+    const command = typeof args.command === 'string' ? args.command.trim() : '';
+    if (!command) return { error: `${tool} needs "command": "...".` };
+    if (command.length > 8000) return { error: 'The command is too long (max 8000 characters). Put it in a script file with WRITE and run that.' };
+
+    const reasons = riskReasons(command);
+    // L1/L2 always ask. L3 runs on its own unless the command looks risky.
+    if (this.cfg.autonomy !== 'L3' || reasons.length > 0) {
+      const warn = reasons.length ? `\n⚠ Berisiko: ${reasons.join('; ')}` : '';
+      const ok = await this.ui.confirm(`Jalankan di ${tool}:\n${command}${warn}\nLanjut?`);
+      if (!ok) {
+        this.log({ type: 'fullshell_declined', shell: tool, command, risks: reasons });
+        return { error: 'The user declined this command.' };
+      }
+    }
+
+    const before = { sha: await this.git.head(), branch: await this.git.currentBranch(), stash: await this.stashCount() };
+    this.log({ type: 'fullshell', shell: tool, command, risks: reasons });
+    const res = await this.tools.full.run(tool, command, { timeoutMs: this.tools.full.clampTimeout(args.timeout_s) });
+    this.log({ type: 'fullshell_result', shell: tool, code: res.code, timedOut: res.timedOut, aborted: res.aborted });
+
+    const note = await this.guardGit(before);
+    if (note === null) return null;
+    return this.tools.full.format(res) + note;
   }
 
   async backupIfUntracked(rel, abs) {

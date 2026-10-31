@@ -114,8 +114,11 @@ node daemon.mjs run "tambahkan validasi email di form signup"
 |-|-|-|
 | `BRIDGE_ROOT` | — | folder proyek, wajib |
 | `BRIDGE_TEST_CMD` | kosong | tanpa test, perubahan tidak terverifikasi |
-| `BRIDGE_AUTONOMY` | `L1` | L1 = konfirmasi tiap patch dan shell; L2 = otomatis, tanya hanya untuk perintah di luar allowlist; L3 = otomatis penuh, perintah di luar allowlist ditolak |
+| `BRIDGE_AUTONOMY` | `L1` | L1 = konfirmasi tiap patch dan shell; L2 = otomatis, tanya hanya untuk perintah di luar allowlist; L3 = otomatis penuh, perintah di luar allowlist ditolak (dengan `BRIDGE_SHELL=full`, L3 menjalankan perintah shell sendiri dan hanya bertanya untuk yang ditandai berisiko) |
 | `BRIDGE_MODEL` | `deepseek` | regex label model; dicek sebelum tiap kirim; kosongkan untuk menonaktifkan |
+| `BRIDGE_SHELL` | mati | `full` menyalakan tool `bash`, `powershell`, dan `cmd` (lihat "Shell penuh"). Bukan sandbox |
+| `BRIDGE_SHELL_KEEP_ENV` | kosong | nama env var rahasia yang tetap diteruskan ke shell penuh, pisah koma (mis. `MY_API_KEY` untuk `curl`) |
+| `BRIDGE_SHELL_MAX_TIMEOUT_S` | 600 | batas atas `timeout_s` yang boleh diminta model per perintah |
 | `BRIDGE_ENV_KEYS` | mati | `1` untuk mengizinkan `fs_read` file `.env` dengan nilai dimasking (`KEY=***`). Nilai disembunyikan, tetapi **nama kunci tetap terkirim** ke Venice (mis. `STRIPE_LIVE_SECRET_KEY`); nyalakan hanya jika nama variabelmu tidak sensitif. Tidak pernah berlaku untuk file kunci/sertifikat |
 | `BRIDGE_MAX_EXPLORE` / `BRIDGE_MAX_STEPS` | 10 / 60 | batas langkah |
 | `BRIDGE_STEP_DELAY_MS` | 1500 | jeda antar giliran supaya UI siap |
@@ -165,11 +168,68 @@ Aturan patch:
 - Path harus ada di `focus.json`.
 - `WRITE` hanya untuk file yang belum ada.
 
+## Shell penuh (opsional)
+
+Secara default model hanya punya `shell_safe`: daftar kecil program (git, npm,
+ls, grep, ...) dengan argumen yang diperiksa. Dengan `BRIDGE_SHELL=full`, model
+juga mendapat shell sungguhan, seperti CLI biasa:
+
+```bash
+export BRIDGE_SHELL=full
+export BRIDGE_AUTONOMY=L1        # tetap L1 sampai kamu nyaman
+node daemon.mjs run "cek apakah API staging hidup lalu perbaiki timeout-nya"
+```
+
+| Tool | Dipakai untuk |
+|-|-|
+| `bash` | Linux, macOS, Git Bash di Windows |
+| `powershell` | `pwsh` (semua OS) atau Windows PowerShell |
+| `cmd` | `cmd.exe` (hanya Windows) |
+
+Yang tersedia dideteksi otomatis saat mulai; hanya yang ditemukan yang
+ditawarkan ke model. Di Windows, `bash` yang ada di PATH bisa jadi WSL: di sana
+sistem berkas yang terlihat berbeda dari Windows, jadi lebih aman pakai Git Bash.
+
+Cara kerjanya:
+- Tiap panggilan adalah proses baru di folder proyek. `cd` dan variabel tidak
+  terbawa ke panggilan berikutnya. Argumen opsional `timeout_s` (dibatasi
+  `BRIDGE_SHELL_MAX_TIMEOUT_S`).
+- **Konfirmasi:** L1 dan L2 bertanya sebelum setiap perintah. L3 menjalankan
+  sendiri, kecuali perintah yang ditandai berisiko (menghapus rekursif, `sudo`,
+  `git push`/`reset --hard`, `curl | sh`, mengirim data keluar lewat `curl -d`/`-F`,
+  `scp`/`rsync`/`nc`, operasi disk, dan menyentuh file yang tampak rahasia seperti
+  `.env` atau `id_rsa`). L3 + shell penuh juga minta persetujuan sekali di awal.
+- **Env var rahasia dibuang** dari proses anak (nama mengandung TOKEN, SECRET,
+  PASSWORD, API_KEY, dst). Kalau `curl` memang butuh satu, daftarkan namanya di
+  `BRIDGE_SHELL_KEEP_ENV`.
+- **Output disamarkan** sebelum dikirim ke Venice: private key, token GitHub/AWS,
+  `sk-...`, JWT, `Bearer ...`, dan nilai `NAMA_RAHASIA=...`. Ini upaya terbaik,
+  bukan jaminan.
+- **Git dijaga:** perintah shell tidak boleh memindahkan state yang dipakai
+  checkpoint. Commit liar dibatalkan (perubahannya tetap di working tree), pindah
+  branch dikembalikan, `git stash` di-pop. Kalau riwayat dimundurkan, run halt;
+  `resume` rollback ke checkpoint terakhir.
+- **Stop / Ctrl+C** mematikan seluruh pohon proses perintah yang sedang jalan.
+  Proses latar belakang yang dimulai model dimatikan saat run berakhir atau di-pause.
+- Tidak tersedia saat eksplorasi (fase itu tetap read-only).
+- stdin perintah ditutup, jadi program yang menunggu input interaktif akan gagal
+  alih-alih menggantung. `git` tidak akan meminta password.
+
+**Batasan jujur.** Ini bukan sandbox. Perintah berjalan dengan hak aksesmu dan
+bisa membaca atau menulis apa saja yang bisa kamu akses, termasuk di luar
+`BRIDGE_ROOT`. Kurungan path, daftar file rahasia, dan `focus.json` **tidak
+berlaku** di dalam shell. Penanda "berisiko" hanyalah rem sebelum bahaya, bukan
+batas: perintah yang sengaja dikaburkan bisa lolos. Apa pun yang dicetak
+perintah akan terkirim ke Venice. Karena itu: mulai dari L1, baca setiap
+perintah sebelum menjawab `y`, dan untuk L2/L3 jalankan daemon di container atau
+VM yang hanya berisi salinan proyek.
+
 ## Keamanan
 
 - Semua path dikurung di dalam `BRIDGE_ROOT`. Symlink keluar ditolak, dan `.git/` tidak bisa disentuh.
 - File rahasia (`.env*`, `*.pem`, `*.key`, `id_rsa`, `credentials.json`, `secrets.*`, dan sejenisnya) ditolak oleh semua jalur baca: `fs_read`, `grep_search`, `git_read`, dan `shell_safe`. Pemeriksa `shell_safe` sadar-flag, jadi `grep -r SECRET .env`, `rg SECRET /`, `cp -t /tmp ...`, `git show HEAD:.env`, dan `git diff --no-index /etc/...` semuanya ditolak. Diff dan grep lewat git juga memakai pathspec exclude untuk file rahasia.
 - `shell_safe` berjalan tanpa shell (`execFile`), dan variabel lingkungan yang mirip token atau password dibuang. `git` hanya untuk subcommand baca.
+- **Shell penuh (`BRIDGE_SHELL=full`)** menonaktifkan semua jaminan path di atas untuk perintah yang dijalankannya; baca bagian "Shell penuh".
 - **Batasan penting (bukan sandbox):** `npm`, `npx`, `node`, `pytest`, `cargo`, dan `go` ada di allowlist, padahal semuanya bisa menjalankan kode apa saja dari proyek. Begitu juga `BRIDGE_TEST_CMD`, yang berjalan dengan `cwd` di root tetapi **tanpa isolasi** — test bisa menulis ke luar root. Kurungan path dan denylist rahasia hanya mengatur argumen perintah; mereka **tidak** menahan kode yang dijalankan perintah itu. Contoh nyata: `node -e "require('fs').readFileSync('/etc/passwd')"` atau skrip test yang membaca `.env` tetap bisa membaca file apa pun milik user dan mengirim hasilnya balik ke Venice. Ditambah risiko prompt injection dari isi file, kurungan path saja tidak cukup. **Untuk L2/L3, jalankan daemon di container atau VM** dengan hanya salinan proyek di dalamnya.
 - WebSocket hanya bind ke 127.0.0.1, Origin harus berasal dari extension, dan token dikirim lewat subprotocol (bukan query string URL, supaya tidak muncul di log). Hanya satu tab Venice yang boleh terhubung; tab kedua ditolak.
 - File di luar git disalin ke `workspace/bak/` sebelum ditimpa.
@@ -200,7 +260,7 @@ runner end-to-end dengan otak palsu (plan, merah lalu hijau, BLOCKED + rollback,
 stop + resume, wajib `fs_read` ulang, nomor langkah dipalsukan, peringatan test
 dilonggarkan, halt + resume karena penghalang), auth WebSocket lewat subprotocol,
 dua kondisi hang (cancel sebelum tersambung, tab ditutup saat menunggu), jitter
-(deterministik saat 0, dalam rentang, clamp), builder plan CDP dan `CdpSession`
+(deterministik saat 0, dalam rentang, clamp), shell penuh (konfirmasi per level, penanda berisiko, penyamaran output, env dibuang, timeout membunuh anak proses, penjaga git, Stop), builder plan CDP dan `CdpSession`
 dengan debugger tiruan (attach gagal → fallback, error di tengah → lapor sejauh
 mana, detach idempoten, watchdog, external detach), dan driver DOM di Chromium
 termasuk deteksi penghalang (CAPTCHA/logout di tengah balasan, kedipan sesaat
@@ -217,6 +277,8 @@ diabaikan), jalur input tepercaya, dan fallback saat transport tepercaya gagal.
   deteksi penghalang), **bukan** kecocokan dengan DOM Venice yang sebenarnya.
 - `blockerSelector` dan `limitSelector` adalah tebakan paling spekulatif karena
   bergantung pada markup challenge/modal Venice; kalibrasi saat penghalang muncul.
+- Shell penuh teruji di Linux dengan `bash`. Jalur `powershell` dan `cmd` hanya
+  teruji pada tingkat deteksi dan logika; belum pernah dijalankan di Windows.
 - Glue `chrome.debugger` di `background.js` (attach/detach nyata, pesan port)
   tidak di-unit-test karena butuh API Chrome; yang teruji adalah `CdpSession`
   dengan debugger tiruan. Jalur input tepercaya di Venice asli belum dicoba.

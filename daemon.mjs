@@ -11,6 +11,7 @@ import { Store } from './state.mjs';
 import { Runner } from './runner.mjs';
 import { Git } from './git.mjs';
 import { catalog } from './prompts.mjs';
+import { detectShells } from './fullshell.mjs';
 
 const ALLOWED_ORIGIN = /^(chrome-extension|moz-extension):\/\/[a-z0-9-]+$/i;
 
@@ -236,6 +237,8 @@ Variabel lingkungan utama:
   BRIDGE_TEST_CMD   perintah test, mis. "npm test"
   BRIDGE_AUTONOMY   L1 (default) | L2 | L3
   BRIDGE_MODEL      regex nama model, default "deepseek" (kosongkan untuk tidak dicek)
+  BRIDGE_SHELL      "full" menyalakan tool bash / powershell / cmd (default mati; BUKAN sandbox)
+  BRIDGE_SHELL_KEEP_ENV  nama env var rahasia yang tetap diteruskan ke shell penuh, pisah koma
   BRIDGE_ENV_KEYS   "1" untuk mengizinkan fs_read file .env dengan nilai dimasking (default mati)
   BRIDGE_PORT       default 8765
   BRIDGE_EXT_ORIGIN opsional, mis. chrome-extension://<id> untuk mengunci ke satu extension`;
@@ -246,7 +249,7 @@ async function main(argv) {
   const store = new Store(cfg.workspace);
 
   if (!cmd || cmd === 'help' || cmd === '--help') return console.log(HELP);
-  if (cmd === 'catalog') return console.log(catalog());
+  if (cmd === 'catalog') return console.log(catalog({ shells: cfg.shellMode === 'full' ? Object.keys(detectShells()) : [] }));
   if (cmd === 'token') return console.log(loadToken(cfg.workspace));
   if (cmd === 'status') return console.log(JSON.stringify(store.load(), null, 2) ?? 'Tidak ada task.');
 

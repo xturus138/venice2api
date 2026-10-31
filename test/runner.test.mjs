@@ -245,3 +245,134 @@ test('a blocker halts with the code, keeps state, and resume continues from the 
   assert.match(brain2.sent[0], /RESUMING/);
   assert.match(fs.readFileSync(path.join(dir, 'math.js'), 'utf8'), /a \+ b/);
 });
+
+// ---------- full shell (BRIDGE_SHELL=full) ----------
+
+const bash = (command, extra = {}) => tool('bash', { command, ...extra });
+const spyUI = (choices, confirm) => {
+  const ui = scriptedUI(choices);
+  ui.asked = [];
+  ui.confirm = async (q) => {
+    ui.asked.push(q);
+    return typeof confirm === 'function' ? confirm(q) : confirm;
+  };
+  return ui;
+};
+const execute = async (env, replies, ui) => {
+  const { dir, g, cfg, store } = setup(env);
+  const brain = scriptedBrain([PLAN, ...replies]);
+  const runner = new Runner({ cfg, store, brain, ui });
+  const state = await runner.start('shell task');
+  return { dir, g, brain, runner, state, ui, cfg, store };
+};
+
+test('full shell is off by default: bash is refused and not advertised', async () => {
+  const { brain, dir } = await execute({}, [bash('echo hi > nope.txt'), tool('halt', { reason: 'end' })], scriptedUI(['a']));
+  assert.match(brain.sent[2], /"bash" is not enabled/);
+  assert.equal(fs.existsSync(path.join(dir, 'nope.txt')), false);
+  assert.doesNotMatch(brain.sent[0], /FULL SHELL/);
+});
+
+test('full shell runs a command, returns its output, and is advertised', async () => {
+  const ui = spyUI(['a'], true);
+  const { brain, dir } = await execute({ BRIDGE_SHELL: 'full' }, [bash('echo hello-from-bash > out.txt; cat out.txt; echo "api_key=SUPERSECRETVALUE"'), tool('halt', { reason: 'end' })], ui);
+  assert.match(brain.sent[0], /FULL SHELL/);
+  assert.match(brain.sent[2], /exit 0/);
+  assert.match(brain.sent[2], /hello-from-bash/);
+  assert.doesNotMatch(brain.sent[2], /SUPERSECRETVALUE/); // masked before it reaches the model
+  assert.equal(fs.readFileSync(path.join(dir, 'out.txt'), 'utf8').trim(), 'hello-from-bash');
+});
+
+test('L1 asks before every command, and a refusal means it never runs', async () => {
+  const ui = spyUI(['a'], false);
+  const { brain, dir } = await execute({ BRIDGE_SHELL: 'full', BRIDGE_AUTONOMY: 'L1' }, [bash('echo x > declined.txt'), tool('halt', { reason: 'end' })], ui);
+  assert.ok(ui.asked.some((q) => /Jalankan di bash/.test(q) && /declined\.txt/.test(q)));
+  assert.match(brain.sent[2], /user declined/);
+  assert.equal(fs.existsSync(path.join(dir, 'declined.txt')), false);
+});
+
+test('L3 runs ordinary commands unasked but still asks for risky ones', async () => {
+  const ui = spyUI(['a'], (q) => !/Berisiko/.test(q)); // approve everything except flagged commands
+  const { brain, dir } = await execute(
+    { BRIDGE_SHELL: 'full', BRIDGE_AUTONOMY: 'L3' },
+    [bash('echo fine > fine.txt'), bash('mkdir victim && rm -rf victim && echo gone > risky.txt'), tool('halt', { reason: 'end' })],
+    ui,
+  );
+  const shellQs = ui.asked.filter((q) => /Jalankan di bash/.test(q));
+  assert.equal(shellQs.length, 1, 'only the risky command should ask');
+  assert.match(shellQs[0], /Berisiko: menghapus file/);
+  assert.equal(fs.existsSync(path.join(dir, 'fine.txt')), true);
+  assert.equal(fs.existsSync(path.join(dir, 'risky.txt')), false);
+  assert.match(brain.sent[3], /user declined/);
+});
+
+test('L3 with full shell must be acknowledged once, otherwise the run does not start', async () => {
+  const { cfg, store } = setup({ BRIDGE_SHELL: 'full', BRIDGE_AUTONOMY: 'L3' });
+  const ui = spyUI([], false);
+  await assert.rejects(new Runner({ cfg, store, brain: scriptedBrain([]), ui }).start('x'), /Dibatalkan/);
+  assert.ok(ui.asked.some((q) => /L3 \+ shell penuh/.test(q)));
+});
+
+test('a command cannot move the runner git state: commits, branch switches and stashes are undone', async () => {
+  const ui = spyUI(['a'], true);
+  const { g, brain } = await execute(
+    { BRIDGE_SHELL: 'full' },
+    [
+      bash('git switch -q -c sneaky && git -c user.email=a@b -c user.name=n commit -q --allow-empty -m sneaky'),
+      bash('echo dirty >> math.js && git stash -q'),
+      tool('halt', { reason: 'end' }),
+    ],
+    ui,
+  );
+  assert.match(g('rev-parse', '--abbrev-ref', 'HEAD').trim(), /^agent\/shell-task-/);
+  assert.equal(g('log', '--format=%s').includes('sneaky'), false); // the sneaky commit is not on the agent branch
+  assert.match(brain.sent[2], /switched back/);
+  assert.match(brain.sent[3], /stashed changes; they were restored/);
+  assert.match(fs.readFileSync(path.join(g('rev-parse', '--show-toplevel').trim(), 'math.js'), 'utf8'), /dirty/);
+});
+
+test('a command that rewinds git history halts the run, and resume restores the checkpoint', async () => {
+  const ui = spyUI(['a'], true);
+  const { state, dir, g, cfg, store } = await execute({ BRIDGE_SHELL: 'full' }, [bash('echo more >> math.js'), bash('git reset -q --hard HEAD~1')], ui);
+  assert.equal(state.phase, 'halted');
+  assert.match(state.haltReason, /memundurkan riwayat git/);
+  assert.equal(state.haltedFrom, 'executing');
+
+  const checkpoint0 = state.checkpoints[0].sha;
+  assert.notEqual(g('rev-parse', 'HEAD').trim(), checkpoint0); // history really was rewound
+
+  const brain2 = scriptedBrain([tool('halt', { reason: 'end' })]);
+  const resumed = await new Runner({ cfg, store, brain: brain2, ui }).resume();
+  assert.equal(g('rev-parse', 'HEAD').trim(), checkpoint0); // rolled back to the recorded checkpoint
+  assert.equal(fs.readFileSync(path.join(dir, 'math.js'), 'utf8'), MATH_BUGGY);
+  assert.match(brain2.sent[0], /RESUMING/);
+  assert.equal(resumed.phase, 'halted'); // the scripted model then halts on purpose
+});
+
+test('Stop kills a running full-shell command and pauses the run quickly', async () => {
+  const ui = spyUI(['a'], true);
+  const { cfg, store } = setup({ BRIDGE_SHELL: 'full' });
+  let runner;
+  const brain = scriptedBrain([
+    PLAN,
+    () => {
+      setTimeout(() => runner.stop('test stop'), 400);
+      return bash('sleep 30');
+    },
+  ]);
+  runner = new Runner({ cfg, store, brain, ui });
+  const t0 = Date.now();
+  const state = await runner.start('shell task');
+  assert.ok(Date.now() - t0 < 10000, `took ${Date.now() - t0}ms`);
+  assert.equal(state.paused, true);
+  assert.equal(state.phase, 'executing');
+});
+
+test('the full shell is not available during exploration', async () => {
+  const ui = spyUI(['a'], true);
+  const { cfg, store } = setup({ BRIDGE_SHELL: 'full' });
+  const brain = scriptedBrain([bash('echo no > explore.txt'), PLAN, tool('halt', { reason: 'end' })]);
+  await new Runner({ cfg, store, brain, ui }).start('shell task');
+  assert.match(brain.sent[1], /not available during exploration/);
+  assert.equal(fs.existsSync(path.join(cfg.root, 'explore.txt')), false);
+});
