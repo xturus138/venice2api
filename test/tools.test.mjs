@@ -98,3 +98,25 @@ test('git_read blocks --no-index and secret pathspecs but allows normal shows', 
   await assert.rejects(tools.git_read({ cmd: 'show', args: ['HEAD:.env'] }), /secrets/);
   await assert.rejects(tools.git_read({ cmd: 'diff', args: ['--no-index', '/etc/hostname', 'src/a.js'] }), /no-index/);
 });
+
+test('secret files: refused by default, masked keys when opted in, never for key files', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vb-sec-'));
+  fs.writeFileSync(path.join(dir, '.env'), 'export API_KEY=sk-xyz\n# note\nDB=postgres://u:p@h/db\n');
+  fs.writeFileSync(path.join(dir, 'id_rsa'), 'PRIVATE KEY\n');
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  const off = new Tools(loadConfig({ BRIDGE_ROOT: dir }));
+  const on = new Tools(loadConfig({ BRIDGE_ROOT: dir, BRIDGE_ENV_KEYS: '1' }));
+  await assert.rejects(off.fs_read({ path: '.env' }), /never sent/);
+  const masked = await on.fs_read({ path: '.env' });
+  assert.match(masked, /API_KEY=\*\*\*/);
+  assert.match(masked, /DB=\*\*\*/);
+  assert.doesNotMatch(masked, /sk-xyz|postgres/);
+  assert.match(masked, /# note/); // comments kept
+  await assert.rejects(on.fs_read({ path: 'id_rsa' }), /refusing/); // never for key files
+});
+
+test('find expression cannot read a reference file', () => {
+  const { tools } = setup();
+  assert.throws(() => tools.checkShell({ cmd: 'find', args: ['.', '-newer', '/etc/passwd'] }), /not allowed/);
+  assert.throws(() => tools.checkShell({ cmd: 'find', args: ['.', '-files0-from', '/etc/x'] }), /not allowed/);
+});

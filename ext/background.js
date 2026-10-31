@@ -64,9 +64,10 @@ chrome.runtime.onConnect.addListener((p) => {
   // first closes) must not silently become the target mid-job.
   if (tab && tab.port && tab._tabId !== tabId) {
     try {
-      p.postMessage({ type: 'status', text: 'Tab Venice lain sudah terhubung ke bridge. Tutup tab ini atau tab yang lain.' });
+      // Tell this tab it was rejected so it stops trying to reconnect every second.
+      p.postMessage({ type: 'rejected', text: 'Tab Venice lain sudah terhubung ke bridge. Tutup tab ini atau tab yang lain.' });
     } catch { /* ignore */ }
-    p.disconnect();
+    setTimeout(() => p.disconnect(), 50);
     return;
   }
   tab = { port: p, _tabId: tabId };

@@ -9,6 +9,7 @@
   let port = null;
   let busy = false;
   let reloadQueued = false;
+  let noReconnect = false;
 
   async function loadSelectors() {
     const { selectors: saved } = await chrome.storage.local.get({ selectors: {} });
@@ -112,6 +113,12 @@
   async function handle(msg) {
     if (msg.type === 'status') return setStatus(msg.text);
     if (msg.type === 'conn') return setConn(msg.ok);
+    if (msg.type === 'rejected') {
+      // Another tab owns the bridge. Stop reconnecting so we do not loop forever.
+      noReconnect = true;
+      setConn(false);
+      return setStatus(msg.text);
+    }
     if (msg.type === 'cancel') {
       driver.cancelled = true;
       return;
@@ -150,7 +157,7 @@
     port.onDisconnect.addListener(() => {
       port = null;
       setConn(false);
-      setTimeout(connect, 1000);
+      if (!noReconnect) setTimeout(connect, 1000);
     });
   }
 

@@ -25,6 +25,9 @@ export function loadConfig(env = process.env) {
     autonomy,
     // Regex (case-insensitive) the active model label must match. Empty = don't check.
     modelPattern: env.BRIDGE_MODEL ?? 'deepseek',
+    // Opt in to let fs_read show the KEYS in .env-style files, with values masked.
+    // Off by default; never applies to key/certificate files.
+    revealEnvKeys: ['1', 'true', 'yes'].includes(String(env.BRIDGE_ENV_KEYS || '').toLowerCase()),
     maxExploreSteps: num(env.BRIDGE_MAX_EXPLORE, 10),
     maxExecSteps: num(env.BRIDGE_MAX_STEPS, 60),
     // Pause between turns so the web UI can settle. Not randomized.

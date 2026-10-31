@@ -75,7 +75,7 @@ node daemon.mjs run "tambahkan validasi email di form signup"
 | `run "<task>"` | mulai task baru |
 | `resume` | lanjutkan task yang terputus |
 | `status` | tampilkan `workspace/state.json` |
-| `abandon` | buang pekerjaan yang belum selesai, kembali ke branch awal |
+| `abandon [--delete-branch]` | buang pekerjaan yang belum selesai, kembali ke branch awal (opsional hapus branch agent) |
 | `token` | tampilkan token extension |
 | `catalog` | cetak katalog tool (opsional, untuk Custom Instructions) |
 
@@ -85,6 +85,7 @@ node daemon.mjs run "tambahkan validasi email di form signup"
 | `BRIDGE_TEST_CMD` | kosong | tanpa test, perubahan tidak terverifikasi |
 | `BRIDGE_AUTONOMY` | `L1` | L1 = konfirmasi tiap patch dan shell; L2 = otomatis, tanya hanya untuk perintah di luar allowlist; L3 = otomatis penuh, perintah di luar allowlist ditolak |
 | `BRIDGE_MODEL` | `deepseek` | regex label model; dicek sebelum tiap kirim; kosongkan untuk menonaktifkan |
+| `BRIDGE_ENV_KEYS` | mati | `1` untuk mengizinkan `fs_read` file `.env` dengan nilai dimasking (`KEY=***`); tidak pernah berlaku untuk file kunci/sertifikat |
 | `BRIDGE_MAX_EXPLORE` / `BRIDGE_MAX_STEPS` | 10 / 60 | batas langkah |
 | `BRIDGE_STEP_DELAY_MS` | 1500 | jeda antar giliran supaya UI siap |
 | `BRIDGE_PORT` | 8765 | port WebSocket |
@@ -128,7 +129,7 @@ Aturan patch:
 - Semua path dikurung di dalam `BRIDGE_ROOT`. Symlink keluar ditolak, dan `.git/` tidak bisa disentuh.
 - File rahasia (`.env*`, `*.pem`, `*.key`, `id_rsa`, `credentials.json`, `secrets.*`, dan sejenisnya) ditolak oleh semua jalur baca: `fs_read`, `grep_search`, `git_read`, dan `shell_safe`. Pemeriksa `shell_safe` sadar-flag, jadi `grep -r SECRET .env`, `rg SECRET /`, `cp -t /tmp ...`, `git show HEAD:.env`, dan `git diff --no-index /etc/...` semuanya ditolak. Diff dan grep lewat git juga memakai pathspec exclude untuk file rahasia.
 - `shell_safe` berjalan tanpa shell (`execFile`), dan variabel lingkungan yang mirip token atau password dibuang. `git` hanya untuk subcommand baca.
-- **Batasan penting (bukan sandbox):** `npm`, `npx`, `node`, `pytest`, `cargo`, dan `go` ada di allowlist, padahal semuanya bisa menjalankan kode apa saja dari proyek. Begitu juga `BRIDGE_TEST_CMD`, yang berjalan dengan `cwd` di root tetapi **tanpa isolasi** — test bisa menulis ke luar root. Ditambah risiko prompt injection dari isi file, kurungan path saja tidak cukup. Untuk L2/L3, jalankan daemon di container atau VM.
+- **Batasan penting (bukan sandbox):** `npm`, `npx`, `node`, `pytest`, `cargo`, dan `go` ada di allowlist, padahal semuanya bisa menjalankan kode apa saja dari proyek. Begitu juga `BRIDGE_TEST_CMD`, yang berjalan dengan `cwd` di root tetapi **tanpa isolasi** — test bisa menulis ke luar root. Kurungan path dan denylist rahasia hanya mengatur argumen perintah; mereka **tidak** menahan kode yang dijalankan perintah itu. Contoh nyata: `node -e "require('fs').readFileSync('/etc/passwd')"` atau skrip test yang membaca `.env` tetap bisa membaca file apa pun milik user dan mengirim hasilnya balik ke Venice. Ditambah risiko prompt injection dari isi file, kurungan path saja tidak cukup. **Untuk L2/L3, jalankan daemon di container atau VM** dengan hanya salinan proyek di dalamnya.
 - WebSocket hanya bind ke 127.0.0.1, Origin harus berasal dari extension, dan token dikirim lewat subprotocol (bukan query string URL, supaya tidak muncul di log). Hanya satu tab Venice yang boleh terhubung; tab kedua ditolak.
 - File di luar git disalin ke `workspace/bak/` sebelum ditimpa.
 - Output tool dibungkus penanda acak per pesan dan ditandai sebagai data, bukan instruksi.

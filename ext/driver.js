@@ -63,9 +63,9 @@
       // Clone, drop the excluded subtrees, then read innerText off-screen so code-block
       // newlines are preserved (textContent would collapse them and break SEARCH/REPLACE).
       const clone = el.cloneNode(true);
-      for (const sel of this.sel.excludeInMessage.split(',')) {
-        for (const x of this.qa(sel.trim(), clone)) x.remove();
-      }
+      // Match the whole selector against the clone (not split on commas, which would
+      // break :is()/:not() groups), then drop the matched subtrees.
+      for (const x of this.qa(this.sel.excludeInMessage, clone)) x.remove();
       const holder = document.createElement('div');
       holder.style.cssText = 'position:fixed;left:-99999px;top:0;white-space:pre-wrap;';
       holder.appendChild(clone);
@@ -216,17 +216,6 @@
         if (Date.now() - start > this.maxReplyMs) throw new Error('balasan tidak selesai dalam batas waktu');
         await sleep(this.pollMs);
       }
-    }
-
-    // One-time check the caller can run before a real task: does the stop button actually
-    // appear while the model types and then disappear? If not, completion detection is weak.
-    async probeStopButton() {
-      const start = Date.now();
-      while (Date.now() - start < 4000) {
-        if (this.isGenerating()) return true;
-        await sleep(100);
-      }
-      return false;
     }
 
     // Match counts per selector, for calibration.

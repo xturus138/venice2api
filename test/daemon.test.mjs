@@ -94,3 +94,22 @@ test('tab closing while waiting rejects the pending reply (no hang)', async () =
     brain.close();
   }
 });
+
+test('pagehide signal (reply id 0) rejects pending work instead of being ignored', async () => {
+  const port = 16000 + Math.floor(Math.random() * 1000);
+  const brain = new WsBrain({ port, token: TOKEN, replyTimeoutMs: 600000 });
+  await brain.listen();
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`, ['venice-bridge', TOKEN], { origin: ORIGIN });
+    await new Promise((r) => ws.on('open', r));
+    ws.send(JSON.stringify({ type: 'hello', tabReady: true }));
+    await new Promise((r) => setTimeout(r, 80));
+    const p = brain.send('hi');
+    await new Promise((r) => setTimeout(r, 80));
+    ws.send(JSON.stringify({ type: 'reply', id: 0, ok: false, error: 'tab ditutup' }));
+    await assert.rejects(p, /tab ditutup/);
+    ws.close();
+  } finally {
+    brain.close();
+  }
+});

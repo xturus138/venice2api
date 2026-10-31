@@ -90,6 +90,9 @@ export class WsBrain {
       } else if (msg.type === 'stop') {
         this.onStop?.('tombol Stop di panel');
       } else if (msg.type === 'reply') {
+        // id 0 is the content script's pagehide signal: the tab is going away, so fail
+        // whatever is in flight rather than wait for the socket close to notice.
+        if (msg.id === 0) return this.rejectPending(`extension: ${msg.error || 'tab ditutup'}`);
         const p = this.pending.get(msg.id);
         if (!p) return;
         this.pending.delete(msg.id);
@@ -229,6 +232,7 @@ Variabel lingkungan utama:
   BRIDGE_TEST_CMD   perintah test, mis. "npm test"
   BRIDGE_AUTONOMY   L1 (default) | L2 | L3
   BRIDGE_MODEL      regex nama model, default "deepseek" (kosongkan untuk tidak dicek)
+  BRIDGE_ENV_KEYS   "1" untuk mengizinkan fs_read file .env dengan nilai dimasking (default mati)
   BRIDGE_PORT       default 8765
   BRIDGE_EXT_ORIGIN opsional, mis. chrome-extension://<id> untuk mengunci ke satu extension`;
 

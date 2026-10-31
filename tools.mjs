@@ -16,7 +16,9 @@ export const RUNS_PROJECT_CODE = new Set(['npm', 'npx', 'node', 'pnpm', 'yarn', 
 
 const GIT_READ_CMDS = new Set(['status', 'log', 'diff', 'show', 'branch']);
 const GIT_SHELL_READ = new Set(['status', 'log', 'diff', 'show', 'branch', 'rev-parse', 'ls-files', 'blame']);
-const FIND_BANNED = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/;
+// Banned: run code / write files / read a reference file (the -newer family and
+// -files0-from leak a file's existence or mtime from outside the project).
+const FIND_BANNED = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls|files0-from|(a|c)?newer\w*)$/;
 
 // Per-command rules for shell_safe. Any token that the command could read or write as a
 // filesystem path must be resolved inside the project, or be a known non-path value.
@@ -153,14 +155,16 @@ export class Tools {
   }
 
   // Resolve a model-supplied path and keep it inside the project.
-  resolve(p, { forWrite = false } = {}) {
+  // allowSecret skips ONLY the secret-file check (used by the masked .env reader); every
+  // other jail check still applies.
+  resolve(p, { forWrite = false, allowSecret = false } = {}) {
     if (typeof p !== 'string' || p.trim() === '') throw new ToolError('path is required');
     const abs = path.resolve(this.root, p.trim());
     const rel = path.relative(this.root, abs);
     if (rel.startsWith('..') || path.isAbsolute(rel)) throw new ToolError(`path is outside the project: ${p}`);
     const parts = rel.split(path.sep);
     if (parts.includes('.git')) throw new ToolError('the .git folder is off limits');
-    if (isSecretPath(rel)) throw new ToolError(`refusing to touch a secrets file: ${rel}`);
+    if (!allowSecret && isSecretPath(rel)) throw new ToolError(`refusing to touch a secrets file: ${rel}`);
 
     // Follow symlinks on the deepest existing ancestor.
     let probe = abs;
@@ -203,7 +207,10 @@ export class Tools {
   }
 
   async fs_read({ path: p, start = 1, end } = {}) {
-    const { abs, rel } = this.resolve(p);
+    // Resolve without the secret check first, so a secret path can be handled deliberately
+    // (masked, or refused with a clear message) rather than leaking or confusing the model.
+    const { abs, rel } = this.resolve(p, { allowSecret: true });
+    if (isSecretPath(rel)) return this.readSecret(abs, rel);
     if (!fs.existsSync(abs)) throw new ToolError(`not found: ${rel}`);
     if (fs.statSync(abs).isDirectory()) throw new ToolError(`${rel} is a directory; use fs_list`);
     const buf = fs.readFileSync(abs);
@@ -225,6 +232,27 @@ export class Tools {
     }
     const more = shownEnd < total ? ` — more below, call fs_read with start=${shownEnd + 1}` : '';
     return `${rel} (lines ${s}-${shownEnd} of ${total}${more})\n${body}`;
+  }
+
+  // Secret files are never returned verbatim. For .env-style files, when the user opted in
+  // (BRIDGE_ENV_KEYS), show the KEY names with values masked so the agent knows what exists.
+  readSecret(abs, rel) {
+    const isEnv = /(^|\/)\.env(\..*)?$/i.test(rel);
+    if (!isEnv || !this.cfg.revealEnvKeys) {
+      throw new ToolError(`refusing to read a secrets file: ${rel}. Its contents are never sent to the web chat.`);
+    }
+    if (!fs.existsSync(abs)) throw new ToolError(`not found: ${rel}`);
+    const out = [];
+    for (const line of fs.readFileSync(abs, 'utf8').replace(/\r\n/g, '\n').split('\n')) {
+      const t = line.trim();
+      if (t === '' || t.startsWith('#')) {
+        out.push(line);
+        continue;
+      }
+      const m = t.match(/^(export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+      out.push(m ? `${m[2]}=***` : '***');
+    }
+    return `${rel} (values masked; keys only)\n${out.join('\n')}`;
   }
 
   async grep_search({ pattern, path: p = '.', fixed = false, ignore_case = false } = {}) {
