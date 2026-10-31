@@ -98,7 +98,11 @@ export class WsBrain {
         this.pending.delete(msg.id);
         clearTimeout(p.timer);
         if (msg.ok) p.resolve({ text: msg.text || '', model: msg.model });
-        else p.reject(new Error(`extension: ${msg.error || 'gagal'}`));
+        else {
+          const e = new Error(msg.error || 'gagal');
+          if (msg.code) e.code = msg.code; // blocked | limit | loggedout, so the runner can halt cleanly
+          p.reject(e);
+        }
       }
     });
     ws.on('close', () => {

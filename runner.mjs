@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { Git } from './git.mjs';
+import { jittered } from './config.mjs';
 import { Tools, ToolError, READ_ONLY_TOOLS, trimFailures } from './tools.mjs';
 import { parseReply } from './protocol.mjs';
 import { applySearchReplace, previewPatch } from './patches.mjs';
@@ -159,6 +160,14 @@ export class Runner {
         this.ui.print(`Dihentikan: ${this.state.haltReason}. Lanjutkan nanti dengan "resume".`);
         return this.state;
       }
+      // A blocker in the web UI (CAPTCHA, limit modal, logout) is not a code failure and the
+      // work so far may be fine. Halt with the code so resume can continue; do not consume a
+      // step and do not roll back.
+      if (['blocked', 'limit', 'loggedout'].includes(err.code)) {
+        this.halt(`[${err.code}] ${err.message}`);
+        this.ui.print('Selesaikan penghalang di tab Venice secara manual, lalu jalankan "resume".');
+        return this.state;
+      }
       this.halt(`error: ${err.message}`);
       throw err;
     } finally {
@@ -179,7 +188,7 @@ export class Runner {
 
   async ask(text) {
     if (this.stopped) throw new StopError(this.stopReason);
-    if (this.cfg.stepDelayMs > 0) await sleep(this.cfg.stepDelayMs);
+    if (this.cfg.stepDelayMs > 0) await sleep(jittered(this.cfg.stepDelayMs, this.cfg.delayJitter));
     if (this.stopped) throw new StopError(this.stopReason);
     this.log({ type: 'send', chars: text.length, newChat: this.needNewChat });
     let reply;

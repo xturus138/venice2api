@@ -58,6 +58,8 @@ tidak bisa diakses waktu kode ini ditulis. Di panel:
 | `newChatButton` | tombol chat baru (tanpa reload halaman) |
 | `modelLabel` | label nama model aktif (klik = buka picker) |
 | `modelOption` | entri di picker model |
+| `blockerSelector` | elemen CAPTCHA/verifikasi (iframe Cloudflare/captcha juga dideteksi otomatis) |
+| `limitSelector` | modal batas penggunaan atau ajakan upgrade |
 
 Kalau UI Venice berubah, cukup kalibrasi ulang. Semua selector juga bisa
 diedit sebagai JSON di halaman Options.
@@ -88,6 +90,7 @@ node daemon.mjs run "tambahkan validasi email di form signup"
 | `BRIDGE_ENV_KEYS` | mati | `1` untuk mengizinkan `fs_read` file `.env` dengan nilai dimasking (`KEY=***`). Nilai disembunyikan, tetapi **nama kunci tetap terkirim** ke Venice (mis. `STRIPE_LIVE_SECRET_KEY`); nyalakan hanya jika nama variabelmu tidak sensitif. Tidak pernah berlaku untuk file kunci/sertifikat |
 | `BRIDGE_MAX_EXPLORE` / `BRIDGE_MAX_STEPS` | 10 / 60 | batas langkah |
 | `BRIDGE_STEP_DELAY_MS` | 1500 | jeda antar giliran supaya UI siap |
+| `BRIDGE_DELAY_JITTER` | 0.35 | mengacak jeda antar giliran dalam ±fraksi ini (clamp 0..0.9; `0` = tanpa acak). Jeda poll di dalam extension juga diacak ±0.25, minimal 100ms |
 | `BRIDGE_PORT` | 8765 | port WebSocket |
 | `BRIDGE_EXT_ORIGIN` | — | kunci ke satu extension: `chrome-extension://<id>` |
 | `BRIDGE_WORKSPACE` | `./workspace` | lokasi state, log, PLAN, NOTES, dan .bak |
@@ -156,8 +159,10 @@ sudah dirender), kurungan path dan pemeriksa shell sadar-flag (termasuk upaya
 bocor rahasia dan keluar root), penolakan `git show HEAD:.env` / `--no-index`,
 runner end-to-end dengan otak palsu (plan, merah lalu hijau, BLOCKED + rollback,
 stop + resume, wajib `fs_read` ulang, nomor langkah dipalsukan, peringatan test
-dilonggarkan), auth WebSocket lewat subprotocol, dua kondisi hang (cancel sebelum
-tersambung, tab ditutup saat menunggu), dan driver DOM di Chromium.
+dilonggarkan, halt + resume karena penghalang), auth WebSocket lewat subprotocol,
+dua kondisi hang (cancel sebelum tersambung, tab ditutup saat menunggu), jitter
+(deterministik saat 0, dalam rentang, clamp), dan driver DOM di Chromium termasuk
+deteksi penghalang (CAPTCHA/logout di tengah balasan, kedipan sesaat diabaikan).
 
 **Belum teruji di Venice asli, perlu kalibrasi di akunmu:**
 - Selector adalah tebakan; kalibrasi lewat panel sebelum dipakai.
@@ -165,13 +170,32 @@ tersambung, tab ditutup saat menunggu), dan driver DOM di Chromium.
   panel memberi peringatan dan driver memakai jeda stabil lebih panjang, tapi
   balasan panjang bisa terpotong. Kalibrasi `stopButton` dengan benar.
 - Test driver di Chromium memakai halaman tiruan yang dibuat agar cocok dengan
-  selector default (`test/fixtures/fake-chat.html`). Itu menguji logika driver
-  (streaming, blok thinking, verifikasi input, kunci model), **bukan** kecocokan
-  dengan DOM Venice yang sebenarnya.
+  selector default (`test/fixtures/fake-chat.html`, `fake-chat-blocker.html`). Itu
+  menguji logika driver (streaming, blok thinking, verifikasi input, kunci model,
+  deteksi penghalang), **bukan** kecocokan dengan DOM Venice yang sebenarnya.
+- `blockerSelector` dan `limitSelector` adalah tebakan paling spekulatif karena
+  bergantung pada markup challenge/modal Venice; kalibrasi saat penghalang muncul.
+
+## Kalau muncul penghalang
+
+Venice bisa menyisipkan penghalang di tengah sesi. Alat ini mendeteksi tiga
+jenis (penghalang harus terlihat pada dua poll berturut-turut, supaya kedipan
+sesaat tidak dianggap), lalu **halt dengan state tersimpan** — bukan menunggu
+sampai timeout. CAPTCHA tidak pernah diselesaikan otomatis.
+
+| Jenis | Yang terlihat | Yang dilakukan alat | Yang kamu lakukan |
+|-|-|-|-|
+| CAPTCHA/verifikasi (`blocked`) | tantangan Cloudflare/captcha | halt, panel disorot kuning | selesaikan verifikasi manual di tab, lalu `resume` |
+| Batas/upgrade (`limit`) | modal limit atau ajakan upgrade | halt | tangani manual (tutup modal / tunggu / upgrade), lalu `resume` |
+| Logout (`loggedout`) | kotak input hilang, balasan masih ada | halt | login lagi di tab, lalu `resume` |
+
+`resume` membuka chat baru, membuang pekerjaan setengah jalan dari langkah
+terakhir (rollback ke checkpoint terakhir), dan melanjutkan dari langkah yang
+sama. Jatah langkah tidak terpakai oleh penghalang.
 
 ## Kalau daemon menggantung
 
-Tidak seharusnya terjadi lagi, tapi kalau tab ditutup atau reload saat loop
-berjalan, daemon menolak request yang tertunda dan mem-pause task. Jalankan
-`node daemon.mjs resume` untuk melanjutkan. Tekan Ctrl+C untuk menghentikan;
-sekali lagi untuk keluar paksa.
+Tidak seharusnya terjadi lagi. Kalau tab ditutup atau reload saat loop
+berjalan, daemon menolak request yang tertunda dan mem-pause task; penghalang
+di atas juga halt, tidak menggantung. Jalankan `node daemon.mjs resume` untuk
+melanjutkan. Tekan Ctrl+C untuk menghentikan; sekali lagi untuk keluar paksa.

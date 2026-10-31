@@ -3,7 +3,7 @@
   if (globalThis.__veniceBridgeLoaded) return;
   globalThis.__veniceBridgeLoaded = true;
 
-  const KEYS = ['input', 'sendButton', 'stopButton', 'assistantMessage', 'excludeInMessage', 'newChatButton', 'modelLabel', 'modelOption'];
+  const KEYS = ['input', 'sendButton', 'stopButton', 'assistantMessage', 'excludeInMessage', 'newChatButton', 'modelLabel', 'modelOption', 'blockerSelector', 'limitSelector'];
   let selectors = { ...globalThis.VB_DEFAULT_SELECTORS };
   let driver = new globalThis.VeniceDriver(selectors);
   let port = null;
@@ -34,6 +34,7 @@
       .row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
       button { font: inherit; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 3px 8px; cursor: pointer; }
       button.stop { background: #8b1c1c; border-color: #b33; }
+      .box.blocked { border-color: #e0a020; box-shadow: 0 0 0 2px #e0a02066, 0 4px 16px rgba(0,0,0,.4); }
       .title { font-weight: 600; display: flex; justify-content: space-between; }
       .status { margin-top: 4px; color: #bbb; word-break: break-word; }
       .out { margin-top: 6px; max-height: 220px; overflow: auto; white-space: pre-wrap; color: #ccc; display: none; }
@@ -61,6 +62,8 @@
     $('.conn').textContent = ok ? '●' : '○';
     $('.conn').style.color = ok ? '#4c4' : '#c44';
   };
+  // Highlight the panel when a blocker (CAPTCHA/limit/logout) needs the user's attention.
+  const setBlocked = (on) => $('.box').classList.toggle('blocked', on);
   const show = (html) => {
     out.style.display = 'block';
     out.innerHTML = html;
@@ -135,6 +138,7 @@
     if (msg.type !== 'send') return;
     if (busy) return port?.postMessage({ type: 'reply', id: msg.id, ok: false, error: 'tab sedang memproses pesan lain' });
     busy = true;
+    setBlocked(false);
     setStatus(`mengirim pesan #${msg.id} (${msg.text.length} karakter)…`);
     try {
       const r = await driver.ask(msg.text, { newChat: msg.newChat, modelPattern: msg.modelPattern });
@@ -145,8 +149,13 @@
           : `balasan #${msg.id} diterima, TAPI tombol stop tidak pernah terlihat — kalibrasi "stopButton" agar balasan tidak terpotong`,
       );
     } catch (err) {
-      port?.postMessage({ type: 'reply', id: msg.id, ok: false, error: err.message });
-      setStatus(`gagal: ${err.message}`);
+      port?.postMessage({ type: 'reply', id: msg.id, ok: false, error: err.message, code: err.code });
+      if (err.code) {
+        setBlocked(true);
+        setStatus(`⚠ ${err.message}`);
+      } else {
+        setStatus(`gagal: ${err.message}`);
+      }
     } finally {
       busy = false;
       if (reloadQueued) {

@@ -19,5 +19,11 @@ globalThis.VB_DEFAULT_SELECTORS = {
   // Shows the name of the active model.
   modelLabel: '[aria-label*="model" i]',
   // Entries in the model picker after it is opened.
-  modelOption: '[role="option"], [role="menuitem"]'
+  modelOption: '[role="option"], [role="menuitem"]',
+  // A CAPTCHA / verification challenge. Kept specific so an ordinary dialog does not match.
+  // (Cloudflare/captcha iframes are also detected in code, regardless of this selector.)
+  blockerSelector: '[class*="captcha" i], [id*="captcha" i], [class*="challenge" i], [data-testid*="captcha" i], [data-testid*="challenge" i]',
+  // A usage-limit or upgrade modal. Combined with role=dialog on purpose, so a normal
+  // dialog alone is not treated as a limit wall.
+  limitSelector: '[role="dialog"][class*="upgrade" i], [role="dialog"][class*="limit" i], [data-testid*="upgrade" i], [data-testid*="usage-limit" i]'
 };

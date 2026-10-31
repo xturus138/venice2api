@@ -8,6 +8,18 @@ function num(v, d) {
   return Number.isFinite(n) && v !== undefined && v !== '' ? n : d;
 }
 
+function clamp(v, lo, hi) {
+  return Math.min(Math.max(v, lo), hi);
+}
+
+// Randomize a delay within ms*(1 ± factor), never below floor. factor 0 = no jitter
+// (so tests stay deterministic). Single source of truth for the node side.
+export function jittered(ms, factor, floor = 0) {
+  if (!factor || ms <= 0) return ms;
+  const delta = ms * factor;
+  return Math.max(floor, ms + (Math.random() * 2 - 1) * delta);
+}
+
 export const AUTONOMY_LEVELS = ['L1', 'L2', 'L3'];
 
 export function loadConfig(env = process.env) {
@@ -30,8 +42,10 @@ export function loadConfig(env = process.env) {
     revealEnvKeys: ['1', 'true', 'yes'].includes(String(env.BRIDGE_ENV_KEYS || '').toLowerCase()),
     maxExploreSteps: num(env.BRIDGE_MAX_EXPLORE, 10),
     maxExecSteps: num(env.BRIDGE_MAX_STEPS, 60),
-    // Pause between turns so the web UI can settle. Not randomized.
+    // Pause between turns so the web UI can settle.
     stepDelayMs: num(env.BRIDGE_STEP_DELAY_MS, 1500),
+    // Randomize the step delay within ±this fraction (0 = off, so tests are deterministic).
+    delayJitter: clamp(num(env.BRIDGE_DELAY_JITTER, 0.35), 0, 0.9),
     replyTimeoutMs: num(env.BRIDGE_REPLY_TIMEOUT_MS, 10 * 60 * 1000),
     readMaxLines: num(env.BRIDGE_READ_MAX_LINES, 200),
     readMaxChars: num(env.BRIDGE_READ_MAX_CHARS, 12000),

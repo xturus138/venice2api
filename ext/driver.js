@@ -2,7 +2,21 @@
 (() => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // Randomize a delay within ms*(1 ± factor), never below floor. factor 0 = no jitter.
+  function jittered(ms, factor, floor = 0) {
+    if (!factor || ms <= 0) return ms;
+    return Math.max(floor, ms + (Math.random() * 2 - 1) * ms * factor);
+  }
+
   class CancelledError extends Error {}
+
+  // A web-UI obstacle the user must clear by hand. code is one of blocked|limit|loggedout.
+  class BlockerError extends Error {
+    constructor(code, message) {
+      super(message);
+      this.code = code;
+    }
+  }
 
   class VeniceDriver {
     constructor(selectors, opts = {}) {
@@ -11,7 +25,12 @@
       this.appearTimeoutMs = opts.appearTimeoutMs ?? 120000;
       this.maxReplyMs = opts.maxReplyMs ?? 9 * 60 * 1000;
       this.pollMs = opts.pollMs ?? 400;
+      this.pollJitter = opts.pollJitter ?? 0.25; // 0 = deterministic (tests)
       this.cancelled = false;
+    }
+
+    nextPoll() {
+      return jittered(this.pollMs, this.pollJitter, 100);
     }
 
     qa(selector, root = document) {
@@ -35,15 +54,49 @@
       if (this.cancelled) throw new CancelledError('dibatalkan');
     }
 
-    async waitFor(fn, timeoutMs) {
+    // onPoll runs once per iteration and may throw (used for blocker detection).
+    async waitFor(fn, timeoutMs, onPoll) {
       const start = Date.now();
       while (Date.now() - start < timeoutMs) {
         this.check();
+        if (onPoll) onPoll();
         const v = fn();
         if (v) return v;
-        await sleep(this.pollMs);
+        await sleep(this.nextPoll());
       }
       return null;
+    }
+
+    // Single-poll read of a web-UI obstacle, or null. Cheap (a few querySelectors).
+    blockerCondition() {
+      const captchaIframe = this.qa('iframe').some(
+        (f) => this.visible(f) && /challenges\.cloudflare|captcha/i.test(f.getAttribute('src') || ''),
+      );
+      if (captchaIframe || this.firstVisible(this.sel.blockerSelector)) return 'blocked';
+      if (this.firstVisible(this.sel.limitSelector)) return 'limit';
+      // Logout: the input is gone but a reply is still on screen. If there are no messages
+      // (e.g. a fresh chat just cleared), do not treat it as logout.
+      if (!this.firstVisible(this.sel.input) && this.messages().length > 0) return 'loggedout';
+      return null;
+    }
+
+    // Returns a watcher that throws a BlockerError only after the SAME condition is seen on
+    // two consecutive polls, to avoid reacting to a transient flicker.
+    blockerWatch() {
+      let last = null;
+      let streak = 0;
+      const messages = {
+        blocked: 'Venice menampilkan CAPTCHA atau verifikasi. Selesaikan manual di tab ini, lalu jalankan "resume".',
+        limit: 'Venice menampilkan batas penggunaan atau ajakan upgrade. Tangani manual di tab ini, lalu jalankan "resume".',
+        loggedout: 'Sesi Venice tampaknya logout (kotak input hilang). Login lagi di tab ini, lalu jalankan "resume".',
+      };
+      return () => {
+        const c = this.blockerCondition();
+        if (c && c === last) streak += 1;
+        else streak = c ? 1 : 0;
+        last = c;
+        if (c && streak >= 2) throw new BlockerError(c, messages[c]);
+      };
     }
 
     messages() {
@@ -184,22 +237,27 @@
       await sleep(250);
       await this.submit(input);
 
-      const appeared = await this.waitFor(() => this.messages().length > before, this.appearTimeoutMs);
-      if (!appeared) throw new Error('balasan tidak muncul (cek selector "assistantMessage")');
+      // Watch for a blocker while waiting for the reply to appear: a CAPTCHA, a limit modal,
+      // or a logout is the usual reason nothing shows up, and it should fail clearly (with a
+      // code) rather than time out blaming the assistantMessage selector.
+      const watch = this.blockerWatch();
+      const appeared = await this.waitFor(() => this.messages().length > before, this.appearTimeoutMs, watch);
+      if (!appeared) throw new Error('balasan tidak muncul dalam batas waktu (model mungkin lama, atau selector "assistantMessage" salah)');
 
-      return this.awaitComplete(model.model);
+      return this.awaitComplete(model.model, watch);
     }
 
     // Wait for the reply to finish. The stop button alone is fragile: if its selector is
     // wrong, isGenerating() is always false and a half-written reply looks done. So we also
     // require the text to stop changing, and we remember whether we EVER saw generation.
-    async awaitComplete(model) {
+    async awaitComplete(model, watch = this.blockerWatch()) {
       const start = Date.now();
       let last = '';
       let stableSince = Date.now();
       let everGenerated = false;
       while (true) {
         this.check();
+        watch(); // throws a BlockerError if a blocker holds across two polls
         const generating = this.isGenerating();
         if (generating) everGenerated = true;
         const t = this.lastReplyText();
@@ -214,7 +272,7 @@
           return { text: t, model, sawStopButton: everGenerated };
         }
         if (Date.now() - start > this.maxReplyMs) throw new Error('balasan tidak selesai dalam batas waktu');
-        await sleep(this.pollMs);
+        await sleep(this.nextPoll());
       }
     }
 
@@ -262,5 +320,6 @@
 
   globalThis.VeniceDriver = VeniceDriver;
   globalThis.VeniceDriver.CancelledError = CancelledError;
+  globalThis.VeniceDriver.BlockerError = BlockerError;
   globalThis.vbSelectorCandidates = candidates;
 })();

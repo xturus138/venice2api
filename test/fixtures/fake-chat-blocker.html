@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<body>
+  <div id="log"></div>
+  <form id="f">
+    <textarea id="box"></textarea>
+    <button id="send" type="submit" aria-label="Send" disabled>Send</button>
+    <button id="stop" type="button" aria-label="Stop" style="display:none">Stop</button>
+  </form>
+  <script>
+    // window.vbScenario controls what breaks mid-reply:
+    //   'blocker'   -> a CAPTCHA element appears and stays
+    //   'loggedout' -> the input box is removed
+    //   'flicker'   -> a CAPTCHA appears for a single tick, then is removed (false positive)
+    const box = document.getElementById('box');
+    const send = document.getElementById('send');
+    const stop = document.getElementById('stop');
+    const log = document.getElementById('log');
+    window.received = [];
+    box.addEventListener('input', () => { send.disabled = box.value.trim() === ''; });
+
+    document.getElementById('f').onsubmit = (e) => {
+      e.preventDefault();
+      window.received.push(box.value);
+      box.value = ''; send.disabled = true;
+      const a = document.createElement('div');
+      a.dataset.role = 'assistant';
+      a.innerHTML = '<p></p><pre><code></code></pre>';
+      log.appendChild(a);
+      stop.style.display = 'inline';
+      const words = 'one two three four five six seven eight'.split(' ');
+      let i = 0;
+      const t = setInterval(() => {
+        if (i < words.length) a.querySelector('p').textContent += (i ? ' ' : '') + words[i];
+        else { clearInterval(t); stop.style.display = 'none'; a.querySelector('code').textContent = '{"tool": "fs_list", "args": {}}'; }
+        // Fire the scenario partway through the stream.
+        if (i === 2) {
+          if (window.vbScenario === 'blocker') {
+            const m = document.createElement('div');
+            m.className = 'captcha-modal';
+            m.textContent = 'Please verify you are human';
+            document.body.appendChild(m);
+          } else if (window.vbScenario === 'loggedout') {
+            box.remove();
+          } else if (window.vbScenario === 'flicker') {
+            const m = document.createElement('div');
+            m.className = 'captcha-modal';
+            m.textContent = 'verify';
+            document.body.appendChild(m);
+            setTimeout(() => m.remove(), 30); // gone well within one poll
+          }
+        }
+        i++;
+      }, 120);
+    };
+  </script>
+</body>
+</html>

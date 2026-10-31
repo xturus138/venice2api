@@ -217,3 +217,31 @@ test('step_done ignores an inflated step number from the model', async () => {
   assert.match(brain.sent[4], /you wrote step 9; the current step is 1/);
   assert.match(g('log', '--format=%s'), /agent: step 1 — fix/);
 });
+
+test('a blocker halts with the code, keeps state, and resume continues from the same step', async () => {
+  const { dir, cfg, store } = setup();
+  const blocker = () => { const e = new Error('CAPTCHA muncul'); e.code = 'blocked'; throw e; };
+  const brain1 = scriptedBrain([
+    PLAN,
+    tool('focus_set', { paths: ['math.js'] }),
+    blocker, // blocker hits before any step completes
+  ]);
+  const halted = await new Runner({ cfg, store, brain: brain1, ui: scriptedUI(['a']) }).start('fix add');
+  assert.equal(halted.phase, 'halted');
+  assert.equal(halted.haltedFrom, 'executing');
+  assert.match(halted.haltReason, /\[blocked\]/);
+  assert.equal(halted.planStep, 1); // not advanced, not rolled back as a failure
+  assert.deepEqual(halted.blockedSteps, []);
+
+  const brain2 = scriptedBrain([
+    tool('focus_set', { paths: ['math.js'] }),
+    patch('a - b', 'a + b'),
+    tool('step_done', { step: 1 }),
+    tool('task_done', { summary: 'done' }),
+  ]);
+  const done = await new Runner({ cfg, store, brain: brain2, ui: scriptedUI(['a']) }).resume();
+  assert.equal(done.phase, 'done');
+  assert.equal(brain2.newChats, 1);
+  assert.match(brain2.sent[0], /RESUMING/);
+  assert.match(fs.readFileSync(path.join(dir, 'math.js'), 'utf8'), /a \+ b/);
+});
