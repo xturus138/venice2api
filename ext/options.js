@@ -19,9 +19,18 @@ $('save').onclick = async () => {
     return say(`JSON selector tidak valid: ${e.message}`, false);
   }
   const custom = {};
+  const invalid = [];
   for (const [k, v] of Object.entries(parsed)) {
-    if (typeof v === 'string' && v.trim() && v !== globalThis.VB_DEFAULT_SELECTORS[k]) custom[k] = v.trim();
+    if (typeof v !== 'string' || !v.trim()) continue;
+    try {
+      document.querySelector(v); // throws on invalid CSS syntax
+    } catch {
+      invalid.push(k);
+      continue;
+    }
+    if (v !== globalThis.VB_DEFAULT_SELECTORS[k]) custom[k] = v.trim();
   }
+  if (invalid.length) return say(`Selector tidak valid (sintaks CSS): ${invalid.join(', ')}`, false);
   await chrome.storage.local.set({ port: Number($('port').value) || 8765, token: $('token').value.trim(), selectors: custom });
   say('Tersimpan.');
 };

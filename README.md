@@ -27,7 +27,7 @@ Kalau proses mati atau di-Stop, jalankan `resume`. Perubahan setengah jalan di-r
 
 ## Setup
 
-Butuh Node 20+, git, dan Chrome atau Chromium.
+Butuh Node 20+, git, dan Chrome/Chromium **versi 116 atau lebih baru** (di bawah itu service worker extension mati di tengah job).
 
 ```bash
 npm install
@@ -126,11 +126,12 @@ Aturan patch:
 ## Keamanan
 
 - Semua path dikurung di dalam `BRIDGE_ROOT`. Symlink keluar ditolak, dan `.git/` tidak bisa disentuh.
-- File rahasia (`.env*`, `*.pem`, `id_rsa`, `credentials.json`, dan sejenisnya) **tidak pernah dibaca**, supaya isinya tidak terkirim ke Venice.
-- `shell_safe` berjalan tanpa shell (`execFile`), dan variabel lingkungan yang mirip token atau password dibuang. `git` hanya untuk subcommand baca, dan `find -exec/-delete` ditolak.
-- **Batasan penting:** `npm`, `npx`, `node`, `pytest`, `cargo`, dan `go` ada di allowlist, padahal semuanya bisa menjalankan kode apa saja dari proyek. Begitu juga perintah test. Ditambah risiko prompt injection dari isi file, artinya allowlist **bukan sandbox**. Untuk L2/L3, jalankan daemon di container atau VM.
-- WebSocket hanya bind ke 127.0.0.1, wajib token, dan Origin harus berasal dari extension.
+- File rahasia (`.env*`, `*.pem`, `*.key`, `id_rsa`, `credentials.json`, `secrets.*`, dan sejenisnya) ditolak oleh semua jalur baca: `fs_read`, `grep_search`, `git_read`, dan `shell_safe`. Pemeriksa `shell_safe` sadar-flag, jadi `grep -r SECRET .env`, `rg SECRET /`, `cp -t /tmp ...`, `git show HEAD:.env`, dan `git diff --no-index /etc/...` semuanya ditolak. Diff dan grep lewat git juga memakai pathspec exclude untuk file rahasia.
+- `shell_safe` berjalan tanpa shell (`execFile`), dan variabel lingkungan yang mirip token atau password dibuang. `git` hanya untuk subcommand baca.
+- **Batasan penting (bukan sandbox):** `npm`, `npx`, `node`, `pytest`, `cargo`, dan `go` ada di allowlist, padahal semuanya bisa menjalankan kode apa saja dari proyek. Begitu juga `BRIDGE_TEST_CMD`, yang berjalan dengan `cwd` di root tetapi **tanpa isolasi** — test bisa menulis ke luar root. Ditambah risiko prompt injection dari isi file, kurungan path saja tidak cukup. Untuk L2/L3, jalankan daemon di container atau VM.
+- WebSocket hanya bind ke 127.0.0.1, Origin harus berasal dari extension, dan token dikirim lewat subprotocol (bukan query string URL, supaya tidak muncul di log). Hanya satu tab Venice yang boleh terhubung; tab kedua ditolak.
 - File di luar git disalin ke `workspace/bak/` sebelum ditimpa.
+- Output tool dibungkus penanda acak per pesan dan ditandai sebagai data, bukan instruksi.
 - Setiap aksi dicatat di `workspace/log.jsonl`.
 
 ## Pemulihan manual
@@ -150,10 +151,26 @@ npm test
 ```
 
 Yang dicakup test: patch, parser balasan (termasuk teks dari markdown yang
-sudah dirender), kurungan path dan allowlist shell, runner end-to-end dengan
-otak palsu (plan, merah lalu hijau, BLOCKED + rollback, stop + resume,
-peringatan test dilonggarkan), keamanan WebSocket, dan driver DOM di Chromium
-memakai halaman chat tiruan (`test/fixtures/fake-chat.html`).
+sudah dirender), kurungan path dan pemeriksa shell sadar-flag (termasuk upaya
+bocor rahasia dan keluar root), penolakan `git show HEAD:.env` / `--no-index`,
+runner end-to-end dengan otak palsu (plan, merah lalu hijau, BLOCKED + rollback,
+stop + resume, wajib `fs_read` ulang, nomor langkah dipalsukan, peringatan test
+dilonggarkan), auth WebSocket lewat subprotocol, dua kondisi hang (cancel sebelum
+tersambung, tab ditutup saat menunggu), dan driver DOM di Chromium.
 
-**Belum teruji:** halaman Venice yang asli. Selector dan deteksi akhir
-balasan perlu dicoba dan dikalibrasi di akunmu.
+**Belum teruji di Venice asli, perlu kalibrasi di akunmu:**
+- Selector adalah tebakan; kalibrasi lewat panel sebelum dipakai.
+- Deteksi akhir balasan ikut mengandalkan `stopButton`. Kalau selector itu salah,
+  panel memberi peringatan dan driver memakai jeda stabil lebih panjang, tapi
+  balasan panjang bisa terpotong. Kalibrasi `stopButton` dengan benar.
+- Test driver di Chromium memakai halaman tiruan yang dibuat agar cocok dengan
+  selector default (`test/fixtures/fake-chat.html`). Itu menguji logika driver
+  (streaming, blok thinking, verifikasi input, kunci model), **bukan** kecocokan
+  dengan DOM Venice yang sebenarnya.
+
+## Kalau daemon menggantung
+
+Tidak seharusnya terjadi lagi, tapi kalau tab ditutup atau reload saat loop
+berjalan, daemon menolak request yang tertunda dan mem-pause task. Jalankan
+`node daemon.mjs resume` untuk melanjutkan. Tekan Ctrl+C untuk menghentikan;
+sekali lagi untuk keluar paksa.

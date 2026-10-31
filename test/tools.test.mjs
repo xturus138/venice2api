@@ -48,7 +48,7 @@ test('fs_list skips .git and lists files', async () => {
 test('grep_search finds untracked files and hides secrets', async () => {
   const { tools } = setup();
   assert.match(await tools.grep_search({ pattern: 'hello' }), /src\/a\.js:2:/);
-  assert.equal(await tools.grep_search({ pattern: 'SECRET' }), '');
+  assert.equal(await tools.grep_search({ pattern: 'SECRET' }), '(no matches)');
 });
 
 test('shell checks', () => {
@@ -68,4 +68,33 @@ test('trimFailures keeps the failure lines', () => {
   const out = trimFailures('ok 1\nok 2\nnoise\nAssertionError: expected 1 to equal 2\n  at foo (a.js:1)\nmore\nmore2\nunrelated\nunrelated2\n');
   assert.match(out, /AssertionError/);
   assert.doesNotMatch(out, /ok 1/);
+});
+
+test('shell path jail is flag-aware (no secret or out-of-root leaks)', () => {
+  const { tools } = setup();
+  // blocked
+  assert.throws(() => tools.checkShell({ cmd: 'grep', args: ['-r', 'SECRET', '.env'] }), /secrets/);
+  assert.throws(() => tools.checkShell({ cmd: 'rg', args: ['SECRET', '/'] }), /outside/);
+  assert.throws(() => tools.checkShell({ cmd: 'grep', args: ['-r', 'x', '/etc/passwd'] }), /outside/);
+  assert.throws(() => tools.checkShell({ cmd: 'cp', args: ['--target-directory=/tmp', 'src/a.js'] }), /outside/);
+  assert.throws(() => tools.checkShell({ cmd: 'cp', args: ['-t', '/tmp', 'src/a.js'] }), /outside/);
+  assert.throws(() => tools.checkShell({ cmd: 'grep', args: ['-e', 'SECRET', '/etc'] }), /outside/);
+  assert.throws(() => tools.checkShell({ cmd: 'find', args: ['/', '-name', 'x'] }), /outside/);
+  assert.throws(() => tools.checkShell({ cmd: 'git', args: ['show', 'HEAD:.env'] }), /secrets/);
+  assert.throws(() => tools.checkShell({ cmd: 'git', args: ['diff', '--no-index', '/etc/hostname', 'src/a.js'] }), /no-index/);
+  // allowed: pattern/glob/type values are not treated as paths
+  for (const a of [
+    ['grep', ['-rn', 'hello', 'src/a.js']],
+    ['find', ['.', '-name', '*.js']],
+    ['find', ['-name', '*.js']],
+    ['rg', ['-n', '--glob', '*.js', '-t', 'js', 'hello', 'src']],
+    ['grep', ['-e', 'hello', 'src/a.js']],
+    ['cat', ['-n', 'src/a.js']],
+  ]) assert.doesNotThrow(() => tools.checkShell({ cmd: a[0], args: a[1] }), a.join(' '));
+});
+
+test('git_read blocks --no-index and secret pathspecs but allows normal shows', async () => {
+  const { tools } = setup();
+  await assert.rejects(tools.git_read({ cmd: 'show', args: ['HEAD:.env'] }), /secrets/);
+  await assert.rejects(tools.git_read({ cmd: 'diff', args: ['--no-index', '/etc/hostname', 'src/a.js'] }), /no-index/);
 });

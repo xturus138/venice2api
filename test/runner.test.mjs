@@ -201,3 +201,19 @@ test('same error three times forces a re-read before the next patch', async () =
   assert.equal(state.phase, 'done');
   assert.deepEqual(state.blockedSteps, []);
 });
+
+test('step_done ignores an inflated step number from the model', async () => {
+  const { g, cfg, store } = setup();
+  const brain = scriptedBrain([
+    PLAN,
+    tool('focus_set', { paths: ['math.js'] }),
+    patch('a - b', 'a + b'),
+    tool('step_done', { step: 9, summary: 'fix' }), // model claims step 9
+    tool('task_done', { summary: 'done' }),
+  ]);
+  const state = await new Runner({ cfg, store, brain, ui: scriptedUI(['a', 'a']) }).start('fix add');
+  assert.equal(state.phase, 'done');
+  assert.equal(state.planStep, 2); // advanced by one, not to 10
+  assert.match(brain.sent[4], /you wrote step 9; the current step is 1/);
+  assert.match(g('log', '--format=%s'), /agent: step 1 — fix/);
+});

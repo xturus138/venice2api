@@ -35,7 +35,7 @@
       u.dataset.role = 'user'; u.textContent = text; log.appendChild(u);
       const a = document.createElement('div');
       a.dataset.role = 'assistant';
-      a.innerHTML = '<details open><summary>Thinking</summary>maybe {"tool":"fs_list","args":{}}</details><p></p><pre><div>tool</div><button>Copy</button><code></code></pre>';
+      a.innerHTML = '<details open class="reasoning"><summary>Thinking</summary>maybe {"tool":"fs_list","args":{}}</details><p></p><pre><div>tool</div><button>Copy</button><code></code></pre>';
       log.appendChild(a);
       stop.style.display = 'inline';
       const words = 'I will read the file now.'.split(' ');

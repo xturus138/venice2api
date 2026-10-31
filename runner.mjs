@@ -442,7 +442,11 @@ export class Runner {
 
   async finishStep(args) {
     const s = this.state;
-    const step = Number(args.step) || s.planStep;
+    // The plan step is the runner's own counter, never the model's claim, so a stray
+    // "step": 5 cannot skip ahead. A mismatch is surfaced in the reply below.
+    const step = s.planStep;
+    const claimed = Number(args.step);
+    const mismatch = Number.isFinite(claimed) && claimed !== step ? ` (you wrote step ${claimed}; the current step is ${step})` : '';
     const summary = String(args.summary || '').slice(0, 72);
     const t = await this.tools.test_run();
     this.log({ type: 'test', step, ok: t.ok, code: t.code });
@@ -456,7 +460,7 @@ export class Runner {
       this.save();
       this.ui.print(`Langkah ${step} hijau → checkpoint ${sha.slice(0, 8)}`);
       const note = t.configured ? 'Tests passed.' : t.output;
-      return `${note} Checkpoint committed for step ${step}. Continue with step ${step + 1}, or task_done if the plan is complete.`;
+      return `${note} Checkpoint committed for step ${step}${mismatch}. Continue with step ${step + 1}, or task_done if the plan is complete.`;
     }
 
     const trimmed = trimFailures(t.output, this.cfg.outputMaxChars);

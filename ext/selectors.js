@@ -10,8 +10,10 @@ globalThis.VB_DEFAULT_SELECTORS = {
   stopButton: 'button[aria-label*="stop" i]',
   // One element per ASSISTANT reply (not user messages).
   assistantMessage: '[data-message-author-role="assistant"], [data-role="assistant"]',
-  // Parts inside a reply to ignore, e.g. the collapsible "thinking" block of reasoning models.
-  excludeInMessage: 'details, [data-reasoning], [class*="reasoning" i], [class*="thinking" i]',
+  // Parts inside a reply to ignore, e.g. the collapsible "thinking" block of reasoning
+  // models. Kept specific on purpose: a bare "details" would also strip legitimate
+  // <details> the model writes into the answer. Calibrate if Venice uses a plain <details>.
+  excludeInMessage: '[data-reasoning], [class*="reasoning" i], [class*="thinking" i], details[class*="reason" i], details[class*="think" i]',
   // Starts a new chat without reloading the page.
   newChatButton: 'a[href="/chat"], button[aria-label*="new chat" i]',
   // Shows the name of the active model.

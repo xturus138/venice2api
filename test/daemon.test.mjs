@@ -43,3 +43,54 @@ test('rejects wrong origin and wrong token; relays send/reply and stop', async (
     brain.close();
   }
 });
+
+test('token via subprotocol works and is kept out of the URL', async () => {
+  const port = 17000 + Math.floor(Math.random() * 1000);
+  const brain = new WsBrain({ port, token: TOKEN, replyTimeoutMs: 5000 });
+  await brain.listen();
+  try {
+    const sub = (protocols) => new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/`, protocols, { origin: ORIGIN });
+      ws.on('open', () => resolve({ ok: true, ws }));
+      ws.on('error', () => resolve({ ok: false }));
+    });
+    const good = await sub(['venice-bridge', TOKEN]);
+    assert.equal(good.ok, true);
+    good.ws?.close();
+    assert.equal((await sub(['venice-bridge', 'b'.repeat(48)])).ok, false);
+  } finally {
+    brain.close();
+  }
+});
+
+test('cancel before any extension connects rejects a pending send (no hang)', async () => {
+  const port = 17500 + Math.floor(Math.random() * 1000);
+  const brain = new WsBrain({ port, token: TOKEN, replyTimeoutMs: 600000 });
+  await brain.listen();
+  try {
+    const p = brain.send('hi');
+    brain.cancel('Ctrl+C');
+    await assert.rejects(p, /Ctrl\+C/);
+  } finally {
+    brain.close();
+  }
+});
+
+test('tab closing while waiting rejects the pending reply (no hang)', async () => {
+  const port = 17800 + Math.floor(Math.random() * 1000);
+  const brain = new WsBrain({ port, token: TOKEN, replyTimeoutMs: 600000 });
+  await brain.listen();
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/`, ['venice-bridge', TOKEN], { origin: ORIGIN });
+    await new Promise((r) => ws.on('open', r));
+    ws.send(JSON.stringify({ type: 'hello', tabReady: true }));
+    await new Promise((r) => setTimeout(r, 80));
+    const p = brain.send('hi');
+    await new Promise((r) => setTimeout(r, 80));
+    ws.send(JSON.stringify({ type: 'tab', tabReady: false }));
+    await assert.rejects(p, /ditutup|dimuat ulang/);
+    ws.close();
+  } finally {
+    brain.close();
+  }
+});

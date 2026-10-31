@@ -17,7 +17,40 @@ export const RUNS_PROJECT_CODE = new Set(['npm', 'npx', 'node', 'pnpm', 'yarn', 
 const GIT_READ_CMDS = new Set(['status', 'log', 'diff', 'show', 'branch']);
 const GIT_SHELL_READ = new Set(['status', 'log', 'diff', 'show', 'branch', 'rev-parse', 'ls-files', 'blame']);
 const FIND_BANNED = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/;
-const PATH_ARG_CMDS = new Set(['ls', 'cat', 'find', 'mkdir', 'mv', 'cp']);
+
+// Per-command rules for shell_safe. Any token that the command could read or write as a
+// filesystem path must be resolved inside the project, or be a known non-path value.
+//   positionalsArePaths  every non-flag arg is a path (ls, cat, mkdir, mv, cp)
+//   write                those paths may be created/overwritten
+//   pathValueFlags       flags whose value IS a path (resolve it), e.g. cp --target-directory
+//   valueFlags           flags whose value is NOT a path (skip it), e.g. grep -m, rg --glob
+//   grep                 first bare positional is the PATTERN unless a pattern-flag cancels it
+//   find                 leading positionals are start dirs; the rest is an expression
+const SHELL_SPEC = {
+  ls: { positionalsArePaths: true },
+  cat: { positionalsArePaths: true },
+  mkdir: { positionalsArePaths: true, write: true },
+  mv: { positionalsArePaths: true, write: true, pathValueFlags: ['-t', '--target-directory'] },
+  cp: { positionalsArePaths: true, write: true, pathValueFlags: ['-t', '--target-directory'] },
+  find: { find: true },
+  grep: {
+    grep: true,
+    patternCancelFlags: ['-e', '--regexp', '-f', '--file'],
+    pathValueFlags: ['-f', '--file'],
+    valueFlags: ['-e', '--regexp', '-m', '--max-count', '-A', '--after-context', '-B', '--before-context', '-C', '--context', '-d', '--directories', '--color', '--colour', '-D', '--devices'],
+  },
+  rg: {
+    grep: true,
+    patternCancelFlags: ['-e', '--regexp', '-f', '--file'],
+    pathValueFlags: ['-f', '--file'],
+    valueFlags: ['-e', '--regexp', '-m', '--max-count', '-A', '--after-context', '-B', '--before-context', '-C', '--context', '-g', '--glob', '--iglob', '-t', '--type', '-T', '--type-not', '--color', '--colors', '-M', '--max-columns', '--sort', '--sortr', '-E', '--encoding'],
+  },
+};
+
+// git pathspecs that keep secret files out of git grep results (defense in depth;
+// the NUL-delimited post-filter in grep_search is authoritative).
+const SECRET_EXCLUDES = ['.env', '.env.*', '.npmrc', '.netrc', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', '*.pem', '*.key', '*.p12', '*.pfx', '*.keystore', '*.jks', 'credentials.json', 'secrets.json', 'secrets.yaml', 'secrets.yml', 'secrets.toml']
+  .flatMap((g) => [`:(exclude,glob)${g}`, `:(exclude,glob)**/${g}`]);
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.venv', 'venv', '__pycache__', 'target', '.next', 'coverage']);
 
@@ -36,6 +69,64 @@ export class ToolError extends Error {}
 
 export function isSecretPath(rel) {
   return SECRET_PATTERNS.some((re) => re.test(rel.replace(/\\/g, '/')));
+}
+
+// Walk an argument list, separating flags from positionals and pulling out the
+// tokens that are paths. Returns { positionals, pathArgs, patternCancelled }.
+function classifyArgs(args, spec) {
+  const positionals = [];
+  const pathArgs = [];
+  let patternCancelled = false;
+  let afterDashDash = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (afterDashDash) {
+      positionals.push(a);
+      continue;
+    }
+    if (a === '--') {
+      afterDashDash = true;
+      continue;
+    }
+    if (a.length > 1 && a.startsWith('-')) {
+      const eq = a.indexOf('=');
+      const name = eq === -1 ? a : a.slice(0, eq);
+      const inline = eq === -1 ? null : a.slice(eq + 1);
+      if (spec.patternCancelFlags?.includes(name)) patternCancelled = true;
+      if (spec.pathValueFlags?.includes(name)) {
+        const v = inline !== null ? inline : args[++i];
+        if (v !== undefined) pathArgs.push(v);
+      } else if (spec.valueFlags?.includes(name) && inline === null) {
+        i++; // this flag's value is not a path; skip it
+      }
+      continue;
+    }
+    positionals.push(a); // bare arg, or a single "-" (stdin)
+  }
+  return { positionals, pathArgs, patternCancelled };
+}
+
+// find's start directories are the leading positionals, before the expression begins.
+function findStartDirs(args) {
+  const dirs = [];
+  for (const a of args) {
+    if (a.startsWith('-') || a === '(' || a === ')' || a === '!' || a === ',') break;
+    dirs.push(a);
+  }
+  return dirs.length ? dirs : ['.'];
+}
+
+// Reject git arguments that could read files outside the project or leak secrets.
+function checkGitArgs(args) {
+  for (const a of args) {
+    if (a === '--no-index') throw new ToolError('git --no-index is not allowed (it can read files outside the project)');
+    if (/^--(output|ext-diff|exec|config)(=|$)/.test(a) || a === '-c') throw new ToolError('that git option is not allowed');
+    if (a.startsWith('-')) continue;
+    // A pathspec, possibly "<rev>:<path>". Check the path part and the whole token.
+    const pathPart = a.includes(':') ? a.slice(a.lastIndexOf(':') + 1) : a;
+    if (path.isAbsolute(pathPart) || pathPart.startsWith('..')) throw new ToolError(`git path is outside the project: ${a}`);
+    if (isSecretPath(pathPart) || isSecretPath(a)) throw new ToolError(`refusing to read a secrets file via git: ${a}`);
+  }
 }
 
 function scrubEnv() {
@@ -139,27 +230,41 @@ export class Tools {
   async grep_search({ pattern, path: p = '.', fixed = false, ignore_case = false } = {}) {
     if (typeof pattern !== 'string' || !pattern) throw new ToolError('pattern is required');
     const { rel } = this.resolve(p);
-    const args = ['grep', '-n', '-I', '--untracked', '--no-color'];
-    if (fixed) args.push('-F');
-    else args.push('-E');
+    // --null makes the output "path\0lineno\0content", so the path parses cleanly even if it
+    // contains a colon. The exclude pathspecs keep most secret files out to begin with.
+    const args = ['grep', '-n', '-I', '--untracked', '--no-color', '--null'];
+    args.push(fixed ? '-F' : '-E');
     if (ignore_case) args.push('-i');
-    args.push('-e', pattern, '--', rel);
+    args.push('-e', pattern, '--', rel, ...SECRET_EXCLUDES);
     const r = await run('git', args, { cwd: this.root, timeout: 30000 });
     if (r.code === 1 && !r.stderr) return '(no matches)';
     if (r.code !== 0) throw new ToolError((r.stderr || 'grep failed').trim());
-    const lines = r.stdout.split('\n').filter(Boolean).filter((l) => !isSecretPath(l.split(':')[0]));
-    const shown = lines.slice(0, this.cfg.grepMaxLines).map((l) => (l.length > 300 ? `${l.slice(0, 300)}…` : l));
+    const lines = [];
+    for (const raw of r.stdout.split('\n')) {
+      if (!raw) continue;
+      const nul = raw.indexOf('\0');
+      const file = nul === -1 ? raw : raw.slice(0, nul);
+      if (isSecretPath(file)) continue; // authoritative secret filter
+      const line = raw.replace(/\0/g, ':');
+      lines.push(line.length > 300 ? `${line.slice(0, 300)}…` : line);
+    }
+    const shown = lines.slice(0, this.cfg.grepMaxLines);
     if (lines.length > shown.length) shown.push(`... ${lines.length - shown.length} more matches; narrow the pattern or path`);
-    return shown.join('\n');
+    return shown.length ? shown.join('\n') : '(no matches)';
   }
 
   async git_read({ cmd = 'status', args = [] } = {}) {
     if (!GIT_READ_CMDS.has(cmd)) throw new ToolError(`git_read cmd must be one of: ${[...GIT_READ_CMDS].join(', ')}`);
     if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) throw new ToolError('args must be a list of strings');
-    if (args.some((a) => /^--(output|ext-diff|exec)|^-c$|^--config/.test(a))) throw new ToolError('that git option is not allowed');
+    checkGitArgs(args);
     let final = args;
     if (cmd === 'log' && args.length === 0) final = ['--oneline', '-n', '20'];
     if (cmd === 'status' && args.length === 0) final = ['--short', '--branch'];
+    // Keep secret files out of full diffs/logs/shows even when they are tracked.
+    if (['diff', 'log', 'show'].includes(cmd)) {
+      if (!final.includes('--')) final = [...final, '--'];
+      final = [...final, ...SECRET_EXCLUDES];
+    }
     const r = await run('git', ['--no-pager', cmd, '--no-color', ...final], { cwd: this.root, timeout: 30000 });
     const text = (r.stdout + (r.code !== 0 ? `\n${r.stderr}` : '')).trim();
     return truncate(text || '(empty)', this.cfg.outputMaxChars);
@@ -185,24 +290,36 @@ export class Tools {
     });
   }
 
-  // Validate a shell_safe request. Returns { cmd, args, runsCode } or throws.
+  // Validate a shell_safe request. Returns { cmd, args, allowed, runsCode } or throws.
   checkShell({ cmd, args = [] } = {}) {
     if (typeof cmd !== 'string' || !cmd) throw new ToolError('cmd is required');
     if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) throw new ToolError('args must be a list of strings');
     if (cmd.includes('/') || cmd.includes(' ')) throw new ToolError('cmd must be a bare program name; put arguments in args');
     const allowed = SHELL_ALLOWLIST.includes(cmd);
-    if (allowed) {
-      if (cmd === 'git') {
-        const sub = args.find((a) => !a.startsWith('-'));
-        if (!GIT_SHELL_READ.has(sub)) throw new ToolError('only read-only git subcommands are allowed; commits and rollbacks are handled by the runner');
-        if (args.some((a) => /^--(output|ext-diff|exec)|^-c$/.test(a))) throw new ToolError('that git option is not allowed');
-      }
-      if (cmd === 'find' && args.some((a) => FIND_BANNED.test(a))) throw new ToolError('find with -exec/-delete/-fprint is not allowed');
-      if (PATH_ARG_CMDS.has(cmd)) {
-        for (const a of args) if (!a.startsWith('-')) this.resolve(a, { forWrite: cmd === 'mv' || cmd === 'cp' || cmd === 'mkdir' });
-      }
-    }
+    if (allowed) this.checkAllowedShell(cmd, args);
     return { cmd, args, allowed, runsCode: RUNS_PROJECT_CODE.has(cmd) };
+  }
+
+  // Every token a safe command could touch as a path must resolve inside the project.
+  checkAllowedShell(cmd, args) {
+    if (cmd === 'git') {
+      const sub = args.find((a) => !a.startsWith('-'));
+      if (!GIT_SHELL_READ.has(sub)) throw new ToolError('only read-only git subcommands are allowed; commits and rollbacks are handled by the runner');
+      checkGitArgs(args);
+      return;
+    }
+    if (cmd === 'find') {
+      if (args.some((a) => FIND_BANNED.test(a))) throw new ToolError('find with -exec/-delete/-fprint is not allowed');
+      for (const d of findStartDirs(args)) this.resolve(d);
+      return;
+    }
+    const spec = SHELL_SPEC[cmd];
+    if (!spec) return; // allowlisted but runs project code (npm, node, ...); no path args to police here
+    const { positionals, pathArgs, patternCancelled } = classifyArgs(args, spec);
+    for (const p of pathArgs) this.resolve(p, { forWrite: !!spec.write });
+    let paths = positionals.filter((p) => p !== '-');
+    if (spec.grep && !patternCancelled) paths = paths.slice(1); // first positional is the search pattern
+    for (const p of paths) this.resolve(p, { forWrite: !!spec.write });
   }
 
   async shell({ cmd, args }) {

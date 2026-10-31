@@ -37,6 +37,8 @@ export class WsBrain {
     this.pending = new Map();
     this.seq = 0;
     this.waiters = [];
+    this.stopped = false;
+    this.stopReason = '';
   }
 
   listen() {
@@ -44,10 +46,14 @@ export class WsBrain {
       host: '127.0.0.1',
       port: this.port,
       maxPayload: 8 * 1024 * 1024,
+      // The token travels in the WebSocket subprotocol, not the URL, so it stays out of
+      // request-URL access logs. Legacy ?token= is still accepted for older builds.
+      handleProtocols: (protocols) => (protocols.has('venice-bridge') ? 'venice-bridge' : false),
       verifyClient: ({ origin, req }, cb) => {
         const url = new URL(req.url, 'http://localhost');
+        const offered = (req.headers['sec-websocket-protocol'] || '').split(',').map((s) => s.trim());
+        const tok = offered.find((p) => p !== 'venice-bridge') || url.searchParams.get('token') || '';
         const okOrigin = this.extOrigin ? origin === this.extOrigin : ALLOWED_ORIGIN.test(origin || '');
-        const tok = url.searchParams.get('token') || '';
         const okToken = tok.length === this.token.length && crypto.timingSafeEqual(Buffer.from(tok), Buffer.from(this.token));
         if (!okOrigin || !okToken) {
           this.onLog(`koneksi ditolak (origin=${origin || '-'}, token ${okToken ? 'ok' : 'salah'})`);
@@ -79,6 +85,8 @@ export class WsBrain {
       if (msg.type === 'hello' || msg.type === 'tab') {
         this.tabReady = !!msg.tabReady;
         if (this.tabReady) this.flushWaiters();
+        // Tab closed or reloaded: no reply is coming for anything in flight.
+        else this.rejectPending('tab Venice ditutup atau dimuat ulang saat menunggu balasan');
       } else if (msg.type === 'stop') {
         this.onStop?.('tombol Stop di panel');
       } else if (msg.type === 'reply') {
@@ -95,23 +103,32 @@ export class WsBrain {
       this.client = null;
       this.tabReady = false;
       this.onLog('extension terputus');
-      for (const [id, p] of this.pending) {
-        clearTimeout(p.timer);
-        p.reject(new Error('extension terputus saat menunggu balasan'));
-        this.pending.delete(id);
-      }
+      this.rejectPending('extension terputus saat menunggu balasan');
     });
+  }
+
+  rejectPending(reason) {
+    for (const [id, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error(reason));
+      this.pending.delete(id);
+    }
+    const w = this.waiters;
+    this.waiters = [];
+    w.forEach((x) => x.reject(new Error(reason)));
   }
 
   flushWaiters() {
     const w = this.waiters;
     this.waiters = [];
-    w.forEach((fn) => fn());
+    w.forEach((x) => x.resolve());
   }
 
+  // Resolves when a tab is ready; rejects if the run is cancelled while we wait.
   waitReady() {
+    if (this.stopped) return Promise.reject(new Error(this.stopReason || 'dihentikan'));
     if (this.client && this.tabReady) return Promise.resolve();
-    return new Promise((resolve) => this.waiters.push(resolve));
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
   }
 
   status(text) {
@@ -120,6 +137,7 @@ export class WsBrain {
 
   async send(text, { newChat = false, modelPattern = '' } = {}) {
     await this.waitReady();
+    if (this.stopped) throw new Error(this.stopReason || 'dihentikan');
     const id = ++this.seq;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -132,12 +150,10 @@ export class WsBrain {
   }
 
   cancel(reason) {
+    this.stopped = true;
+    this.stopReason = reason;
     this.client?.send(JSON.stringify({ type: 'cancel' }));
-    for (const [id, p] of this.pending) {
-      clearTimeout(p.timer);
-      p.reject(new Error(reason));
-      this.pending.delete(id);
-    }
+    this.rejectPending(reason);
   }
 
   close() {
@@ -204,7 +220,7 @@ Pemakaian:
   node daemon.mjs run "<deskripsi task>"   mulai task baru
   node daemon.mjs resume                   lanjutkan task yang terputus
   node daemon.mjs status                   tampilkan state.json
-  node daemon.mjs abandon                  rollback ke checkpoint 0, kembali ke branch awal, hapus state
+  node daemon.mjs abandon [--delete-branch] rollback ke checkpoint 0, kembali ke branch awal, hapus state
   node daemon.mjs token                    tampilkan token untuk extension
   node daemon.mjs catalog                  cetak katalog tool (opsional: tempel di Custom Instructions)
 
@@ -236,9 +252,15 @@ async function main(argv) {
       if ((await git.currentBranch()) !== s.branch) await git.must(['switch', '-q', s.branch]);
       await git.rollback(s.checkpoints[0].sha);
     }
+    const deleteBranch = rest.includes('--delete-branch');
     if (s.baseBranch) {
       await git.must(['switch', '-q', s.baseBranch]);
-      console.log(`Kembali ke ${s.baseBranch}. Branch ${s.branch} masih ada (perubahan yang belum di-commit sebelum task tersimpan di checkpoint 0 di sana). Hapus dengan: git branch -D ${s.branch}`);
+      if (deleteBranch && s.phase !== 'done') {
+        await git.git(['branch', '-D', s.branch]);
+        console.log(`Kembali ke ${s.baseBranch}. Branch ${s.branch} dihapus.`);
+      } else {
+        console.log(`Kembali ke ${s.baseBranch}. Branch ${s.branch} masih ada (perubahan yang belum di-commit sebelum task tersimpan di checkpoint 0 di sana). Hapus dengan: git branch -D ${s.branch}${s.phase === 'done' ? '' : ', atau jalankan abandon --delete-branch'}`);
+      }
     }
     store.reset();
     return console.log('State dihapus. File .bak (jika ada) ada di workspace/bak/.');
@@ -295,6 +317,10 @@ const isMain = (() => {
 })();
 
 if (isMain) {
+  process.on('unhandledRejection', (err) => {
+    console.error(`Unhandled rejection: ${err?.message || err}`);
+    process.exit(1);
+  });
   main(process.argv.slice(2)).catch((err) => {
     console.error(`Error: ${err.message}`);
     process.exit(1);

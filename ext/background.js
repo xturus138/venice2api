@@ -28,7 +28,8 @@ async function connect() {
     toTab({ type: 'status', text: 'Token belum diisi. Buka halaman Options extension.' });
     return;
   }
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`);
+  // Token goes in the subprotocol, not the URL, so it does not land in request-URL logs.
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/`, ['venice-bridge', token]);
   ws = socket;
   socket.onopen = () => {
     toTab({ type: 'conn', ok: true });
@@ -58,12 +59,24 @@ async function connect() {
 
 chrome.runtime.onConnect.addListener((p) => {
   if (p.name !== 'venice-bridge') return;
-  tab = p;
+  const tabId = p.sender?.tab?.id;
+  // Lock onto ONE Venice tab for the whole run. A second tab (or a reopened one after the
+  // first closes) must not silently become the target mid-job.
+  if (tab && tab.port && tab._tabId !== tabId) {
+    try {
+      p.postMessage({ type: 'status', text: 'Tab Venice lain sudah terhubung ke bridge. Tutup tab ini atau tab yang lain.' });
+    } catch { /* ignore */ }
+    p.disconnect();
+    return;
+  }
+  tab = { port: p, _tabId: tabId };
+  // Keep the old helpers working: they call tab.postMessage.
+  tab.postMessage = (m) => p.postMessage(m);
   p.onMessage.addListener((msg) => {
     if (msg.type === 'reply' || msg.type === 'stop') toDaemon(msg);
   });
   p.onDisconnect.addListener(() => {
-    if (tab !== p) return;
+    if (tab?.port !== p) return;
     tab = null;
     toDaemon({ type: 'tab', tabReady: false });
   });

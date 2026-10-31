@@ -3,15 +3,21 @@
   if (globalThis.__veniceBridgeLoaded) return;
   globalThis.__veniceBridgeLoaded = true;
 
-  const KEYS = ['input', 'sendButton', 'stopButton', 'assistantMessage', 'newChatButton', 'modelLabel', 'modelOption'];
+  const KEYS = ['input', 'sendButton', 'stopButton', 'assistantMessage', 'excludeInMessage', 'newChatButton', 'modelLabel', 'modelOption'];
   let selectors = { ...globalThis.VB_DEFAULT_SELECTORS };
   let driver = new globalThis.VeniceDriver(selectors);
   let port = null;
   let busy = false;
+  let reloadQueued = false;
 
   async function loadSelectors() {
     const { selectors: saved } = await chrome.storage.local.get({ selectors: {} });
     selectors = { ...globalThis.VB_DEFAULT_SELECTORS, ...saved };
+    // Never swap the driver out from under a running job, or Stop would cancel the wrong one.
+    if (busy) {
+      reloadQueued = true;
+      return;
+    }
     driver = new globalThis.VeniceDriver(selectors);
   }
 
@@ -117,12 +123,20 @@
     try {
       const r = await driver.ask(msg.text, { newChat: msg.newChat, modelPattern: msg.modelPattern });
       port?.postMessage({ type: 'reply', id: msg.id, ok: true, text: r.text, model: r.model });
-      setStatus(`balasan #${msg.id} diterima (${r.text.length} karakter)`);
+      setStatus(
+        r.sawStopButton
+          ? `balasan #${msg.id} diterima (${r.text.length} karakter)`
+          : `balasan #${msg.id} diterima, TAPI tombol stop tidak pernah terlihat — kalibrasi "stopButton" agar balasan tidak terpotong`,
+      );
     } catch (err) {
       port?.postMessage({ type: 'reply', id: msg.id, ok: false, error: err.message });
       setStatus(`gagal: ${err.message}`);
     } finally {
       busy = false;
+      if (reloadQueued) {
+        reloadQueued = false;
+        loadSelectors();
+      }
     }
   }
 
@@ -143,6 +157,14 @@
   setInterval(() => port?.postMessage({ type: 'keepalive' }), 25000);
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.selectors) loadSelectors();
+  });
+  // If the tab is navigating away mid-job, tell the daemon so it does not wait in vain.
+  window.addEventListener('pagehide', () => {
+    if (busy) {
+      try {
+        port?.postMessage({ type: 'reply', id: 0, ok: false, error: 'tab ditutup' });
+      } catch { /* ignore */ }
+    }
   });
   loadSelectors().then(() => {
     setStatus('menghubungkan ke daemon…');

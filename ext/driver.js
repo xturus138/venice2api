@@ -54,15 +54,27 @@
       return !!this.firstVisible(this.sel.stopButton);
     }
 
-    // Text of a reply without the excluded parts (e.g. the thinking block).
+    // Text of a reply with the excluded parts (e.g. the thinking block) removed by
+    // POSITION, not by string replace — so text that merely repeats in the answer stays.
     extract(el) {
       if (!el) return '';
-      let text = el.innerText ?? el.textContent ?? '';
-      for (const x of this.qa(this.sel.excludeInMessage, el)) {
-        const t = x.innerText ?? x.textContent ?? '';
-        if (t) text = text.replace(t, '');
+      const excluded = this.qa(this.sel.excludeInMessage, el);
+      if (!excluded.length) return (el.innerText ?? el.textContent ?? '').trim();
+      // Clone, drop the excluded subtrees, then read innerText off-screen so code-block
+      // newlines are preserved (textContent would collapse them and break SEARCH/REPLACE).
+      const clone = el.cloneNode(true);
+      for (const sel of this.sel.excludeInMessage.split(',')) {
+        for (const x of this.qa(sel.trim(), clone)) x.remove();
       }
-      return text.trim();
+      const holder = document.createElement('div');
+      holder.style.cssText = 'position:fixed;left:-99999px;top:0;white-space:pre-wrap;';
+      holder.appendChild(clone);
+      document.body.appendChild(holder);
+      try {
+        return (clone.innerText ?? clone.textContent ?? '').trim();
+      } finally {
+        holder.remove();
+      }
     }
 
     lastReplyText() {
@@ -70,26 +82,46 @@
       return this.extract(m[m.length - 1]);
     }
 
+    inputValue(el) {
+      return el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' ? el.value : (el.innerText ?? el.textContent ?? '');
+    }
+
+    // Fill the message box and VERIFY it actually holds the text. Rich editors
+    // (ProseMirror, Lexical) ignore naive writes, which otherwise sends an empty prompt.
     setInput(el, text) {
       el.focus();
+      const expect = text.replace(/\r\n/g, '\n').trimEnd();
+      const holds = () => this.inputValue(el).replace(/\r\n/g, '\n').trimEnd() === expect;
+
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
         const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, text);
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
+        if (!holds()) throw new Error('kotak input tidak terisi dengan benar');
         return;
       }
-      // contenteditable editors (ProseMirror, Lexical, ...)
+
+      // contenteditable: execCommand('insertText') is the one path rich editors reliably
+      // accept. Clear first, insert, then fall back to a paste event, and verify.
       const range = document.createRange();
       range.selectNodeContents(el);
       const selection = window.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
-      const ok = document.execCommand && document.execCommand('insertText', false, text);
-      if (!ok) {
+      document.execCommand && document.execCommand('insertText', false, text);
+      if (!holds()) {
+        try {
+          const dt = new DataTransfer();
+          dt.setData('text/plain', text);
+          el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+        } catch { /* DataTransfer unavailable */ }
+      }
+      if (!holds()) {
         el.textContent = text;
         el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
       }
+      if (!holds()) throw new Error('editor tidak menerima teks (cek selector "input"; editor rich text mungkin menolak penulisan otomatis)');
     }
 
     async submit(el) {
@@ -148,29 +180,53 @@
       const input = this.firstVisible(this.sel.input);
       if (!input) throw new Error('kotak input tidak ditemukan (selector "input")');
       const before = this.messages().length;
-      this.setInput(input, text);
+      this.setInput(input, text); // throws if the box did not actually take the text
       await sleep(250);
       await this.submit(input);
 
       const appeared = await this.waitFor(() => this.messages().length > before, this.appearTimeoutMs);
       if (!appeared) throw new Error('balasan tidak muncul (cek selector "assistantMessage")');
 
+      return this.awaitComplete(model.model);
+    }
+
+    // Wait for the reply to finish. The stop button alone is fragile: if its selector is
+    // wrong, isGenerating() is always false and a half-written reply looks done. So we also
+    // require the text to stop changing, and we remember whether we EVER saw generation.
+    async awaitComplete(model) {
       const start = Date.now();
       let last = '';
       let stableSince = Date.now();
+      let everGenerated = false;
       while (true) {
         this.check();
+        const generating = this.isGenerating();
+        if (generating) everGenerated = true;
         const t = this.lastReplyText();
         if (t !== last) {
           last = t;
           stableSince = Date.now();
         }
-        if (t && !this.isGenerating() && Date.now() - stableSince >= this.stableMs) {
-          return { text: t, model: model.model };
+        const stableFor = Date.now() - stableSince;
+        // If the stop button never showed, we cannot trust it — demand a longer quiet period.
+        const need = everGenerated ? this.stableMs : this.stableMs * 3;
+        if (t && !generating && stableFor >= need) {
+          return { text: t, model, sawStopButton: everGenerated };
         }
         if (Date.now() - start > this.maxReplyMs) throw new Error('balasan tidak selesai dalam batas waktu');
         await sleep(this.pollMs);
       }
+    }
+
+    // One-time check the caller can run before a real task: does the stop button actually
+    // appear while the model types and then disappear? If not, completion detection is weak.
+    async probeStopButton() {
+      const start = Date.now();
+      while (Date.now() - start < 4000) {
+        if (this.isGenerating()) return true;
+        await sleep(100);
+      }
+      return false;
     }
 
     // Match counts per selector, for calibration.
